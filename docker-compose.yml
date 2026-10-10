@@ -1,0 +1,14 @@
+services:
+  gameboy-multiplayer:
+    build: .
+    container_name: gameboy-multiplayer
+    restart: unless-stopped
+    ports:
+      - "8000:8080"
+    environment:
+      - PORT=8080
+      - HOST=0.0.0.0
+    volumes:
+      - ./server.js:/app/server.js
+      - ./dist:/app/dist
+      - ./roms:/app/roms

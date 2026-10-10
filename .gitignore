@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Backup & temporary files
+*.bak
+dist/patch-ui.js
+
+# Secrets & SSH keys
+.env
+*.env
+*.key
+truenas_key*
+id_rsa*
+id_ed25519*
+
+# Copyrighted ROM binaries (keep README.md and demo .sav)
+roms/*.gb
+roms/*.gbc
+roms/*.ram
+roms/*.rtc
+
+# OS & Editor files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+.vscode/
+.idea/
