@@ -1,13 +1,86 @@
 /**
- * Game Boy Online Multiplayer - Retro UI, Live Chat & Persistence Engine
+ * Game Boy Online Multiplayer - Retro UI, Treffen-inspired Party-Hub,
+ * Auto Link-Cable, Live Chat, Persistence & PKHeX Save Engine
  */
 
 (function() {
-  let chatWs = null;
-  let currentRoom = null;
+  const CODE_ALPHABET = 'abcdefghijklmnpqrstuvwxyz0123456789';
+
+  const AVATAR_POOL = [
+    { avatar: '🐶', color: '#6366f1' },
+    { avatar: '🦊', color: '#f97316' },
+    { avatar: '🐱', color: '#06b6d4' },
+    { avatar: '🐼', color: '#ec4899' },
+    { avatar: '🐸', color: '#10b981' },
+    { avatar: '🐰', color: '#8b5cf6' },
+    { avatar: '🦁', color: '#eab308' },
+    { avatar: '🦄', color: '#f43f5e' },
+    { avatar: '🐧', color: '#3b82f6' },
+    { avatar: '🐻', color: '#d97706' }
+  ];
+
+  const ALL_AVATARS = [
+    '🐶', '🦊', '🐱', '🐼', '🐸', '🐰',
+    '🦁', '🦄', '🐧', '🐻', '🐵', '🐙',
+    '🚀', '👑', '👻', '⚡', '🔥', '🎮'
+  ];
+
+  function generateRoomCode(len = 4) {
+    let out = '';
+    for (let i = 0; i < len; i++) {
+      out += CODE_ALPHABET.charAt(Math.floor(Math.random() * CODE_ALPHABET.length));
+    }
+    return out;
+  }
+
+  function normalizeRoomCode(code) {
+    return (code || '').trim().toLowerCase().replace(/o/g, '0').replace(/[^a-z0-9]/g, '');
+  }
+
+  // Persistent Player Identity
+  let playerId = localStorage.getItem('gb_player_id');
+  if (!playerId) {
+    playerId = 'p_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+    localStorage.setItem('gb_player_id', playerId);
+  }
+
+  const randomPreset = AVATAR_POOL[Math.floor(Math.random() * AVATAR_POOL.length)];
+  let playerName = localStorage.getItem('gb_player_name') || ('Spieler_' + Math.floor(100 + Math.random() * 900));
+  let playerAvatar = localStorage.getItem('gb_player_avatar') || randomPreset.avatar;
+  let playerColor = localStorage.getItem('gb_player_color') || randomPreset.color;
+
+  // Determine initial Room Code from URL (?room= or ?code=), or generate one automatically like Treffen
+  const initUrlParams = new URLSearchParams(window.location.search);
+  let initialRoom = normalizeRoomCode(initUrlParams.get('room') || initUrlParams.get('code') || '');
+  if (!initialRoom) {
+    initialRoom = generateRoomCode(4);
+    try {
+      const u = new URL(window.location.href);
+      u.searchParams.set('room', initialRoom);
+      window.history.replaceState({ room: initialRoom }, '', u.toString());
+    } catch (e) {}
+  }
+
+  let currentRoom = initialRoom;
   let currentRomName = localStorage.getItem('gb_last_rom_name') || null;
-  let playerName = localStorage.getItem('gb_player_name') || 'Spieler_' + Math.floor(100 + Math.random() * 900);
   let isGameInitialized = false;
+
+  // Party & Link-Cable State
+  let chatWs = null;
+  let chatReconnectTimer = null;
+  let linkWs = null;
+  let linkReconnectTimer = null;
+  let linkConnectedRoom = null;
+  let isLinkPaired = false;
+  let linkPeerCount = 0;
+  let workletSerialHooked = false;
+
+  const partyState = {
+    isHost: false,
+    hostId: null,
+    selectedRom: null,
+    players: []
+  };
 
   // Sound generator using Web Audio API (Retro 8-bit Synth)
   function playRetroBlip(freq = 440, type = 'square', duration = 0.08) {
@@ -23,7 +96,23 @@
       gain.connect(audioCtx.destination);
       osc.start();
       osc.stop(audioCtx.currentTime + duration);
-    } catch(e) {}
+    } catch (e) {}
+  }
+
+  function showToast(text) {
+    let toast = document.getElementById('party-toast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.id = 'party-toast';
+      toast.className = 'party-toast';
+      document.body.appendChild(toast);
+    }
+    toast.textContent = text;
+    toast.classList.add('show');
+    clearTimeout(toast._timer);
+    toast._timer = setTimeout(() => {
+      toast.classList.remove('show');
+    }, 2600);
   }
 
   // --- IndexedDB Persistence for active ROM bytes ---
@@ -53,7 +142,8 @@
       tx.objectStore('session').put({ name, buffer: arrayBuffer, timestamp: Date.now() }, 'active_rom');
       updateRomDisplay();
       refreshSaveManagerList();
-    } catch(e) {
+      sendPartyUpdate();
+    } catch (e) {
       console.warn('Failed to cache ROM in IndexedDB:', e);
     }
   }
@@ -67,7 +157,7 @@
         req.onsuccess = () => resolve(req.result || null);
         req.onerror = () => resolve(null);
       });
-    } catch(e) {
+    } catch (e) {
       return null;
     }
   }
@@ -80,13 +170,13 @@
       const tx = db.transaction('session', 'readwrite');
       tx.objectStore('session').delete('active_rom');
       updateRomDisplay();
-    } catch(e) {}
+      sendPartyUpdate();
+    } catch (e) {}
   }
 
   // --- .sav Battery Save Management & PKHeX Validation Engine ---
   function openGebehDb() {
     return new Promise((resolve) => {
-      // Use version 2 to force upgrade if empty, or just let it create if it doesn't exist
       const req = indexedDB.open('gebeh', 2);
       req.onupgradeneeded = (e) => {
         const db = e.target.result;
@@ -99,22 +189,18 @@
     });
   }
 
-  // Force emulator WebAudio worklet to flush latest RAM into IndexedDB immediately
   async function forceSaveFlush() {
     try {
       if (window.__gbWorkletNode && window.__gbWorkletNode.port) {
         window.__gbWorkletNode.port.postMessage({ type: 'requestSave' });
       }
-    } catch(e) {}
-    // Allow AudioWorklet postMessage and IndexedDB transaction time to settle
+    } catch (e) {}
     await new Promise(r => setTimeout(r, 200));
   }
 
-  // Inspect raw SRAM bytes (Check empty 0x00, Gen 1/2 validity, trainer name, checksum)
   function inspectSaveBytes(bytes) {
     if (!bytes || bytes.length === 0) return { valid: false, reason: 'Keine Daten' };
 
-    // Check if save is entirely zeroes (uninitialized / before in-game saving)
     let nonZeroCount = 0;
     for (let i = 0; i < bytes.length; i++) {
       if (bytes[i] !== 0) {
@@ -130,17 +216,12 @@
       };
     }
 
-    // Gen 1 Validation (Red / Blue / Yellow - International & German)
-    // PKHeX checks: HasListAt(data, 0x2F2C, 0x30C0, 20)
-    // 0x2F2C: Team-Anzahl (<= 6), terminator at 0x2F2C + 1 + count == 0xFF
-    // 0x30C0: Box-Anzahl (<= 20), terminator at 0x30C0 + 1 + count == 0xFF
     const g1PartyCount = bytes[0x2F2C];
     const g1PartyTerm = bytes[0x2F2C + 1 + g1PartyCount];
     const g1BoxCount = bytes[0x30C0];
     const g1BoxTerm = bytes[0x30C0 + 1 + g1BoxCount];
 
     if (bytes.length === 32768 && g1PartyCount <= 6 && g1PartyTerm === 0xFF && g1BoxCount <= 20 && g1BoxTerm === 0xFF) {
-      // Calculate Gen 1 Checksum (0x2598..0x3522 vs 0x3523)
       let sum = 0;
       for (let i = 0x2598; i < 0x3523; i++) {
         sum = (sum + bytes[i]) & 0xFF;
@@ -149,7 +230,6 @@
       const storedChk = bytes[0x3523];
       const chkOk = (calcChk === storedChk);
 
-      // Decode Trainer Name (Game Boy Character encoding at 0x2598..0x25A3)
       let trainer = '';
       for (let i = 0x2598; i < 0x2598 + 11; i++) {
         const b = bytes[i];
@@ -160,7 +240,6 @@
         else trainer += '?';
       }
 
-      // Gym Badges at 0x2602
       let badges = 0;
       const badgeByte = bytes[0x2602];
       for (let bit = 0; bit < 8; bit++) {
@@ -181,7 +260,6 @@
       };
     }
 
-    // Gen 2 Validation (Gold / Silver / Crystal)
     const g2PartyCount = bytes[0x288A];
     const g2PartyTerm = bytes[0x288A + 1 + g2PartyCount];
     const g2BoxCount = bytes[0x2D6C];
@@ -231,14 +309,13 @@
         };
         req.onerror = () => resolve([]);
       });
-    } catch(e) {
+    } catch (e) {
       return [];
     }
   }
 
   async function exportSave(title) {
     try {
-      // 1. Force emulator to flush RAM into IndexedDB
       await forceSaveFlush();
 
       const db = await openGebehDb();
@@ -253,7 +330,6 @@
         }
 
         const raw = (data instanceof Uint8Array) ? data : new Uint8Array(data);
-        // Ensure exact 32,768 bytes (0x8000) for standard Game Boy SRAM
         let bytes = raw;
         if (bytes.length < 32768) {
           const padded = new Uint8Array(32768);
@@ -268,10 +344,10 @@
         if (info.isEmpty) {
           const proceed = confirm(
             `⚠️ ACHTUNG: Der Spielstand für "${title}" ist noch ungespeichert (32 KB leere Nullen)!\n\n` +
-            `Externe Emulatoren werden diese Datei als ungültig ablehnen, weil im Spiel noch kein Spielstand angelegt wurde.\n\n` +
+            `PKHeX wird diese Datei als ungültig ablehnen, weil im Spiel noch kein Spielstand angelegt wurde.\n\n` +
             `👉 So machst du ihn PKHeX-tauglich:\n` +
             `1. Drücke im Spiel START [Taste Enter]\n` +
-            `2. Gehe auf "SICHERN" und bestätige mit JA [Taste J / A]\n` +
+            `2. Gehe auf "SICHERN" und bestätige mit JA [Taste A]\n` +
             `3. Klicke im Menü auf "🔄 Emulator sichern (Sync)"\n` +
             `4. Lade die .sav-Datei danach erneut herunter!\n\n` +
             `Möchtest du die leere Datei trotzdem herunterladen?`
@@ -292,14 +368,10 @@
         playRetroBlip(750, 'triangle', 0.1);
 
         if (info.pkhexReady) {
-          addChatMessage({
-            type: 'system',
-            text: `✅ Spielstand "${cleanName}" exportiert (${bytes.length} Bytes). Trainer: ${info.trainer} | Gültig!`,
-            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-          });
+          showToast(`✅ "${cleanName}" exportiert (PKHeX-bereit)`);
         }
       };
-    } catch(e) {
+    } catch (e) {
       alert('Fehler beim Exportieren: ' + e.message);
     }
   }
@@ -321,11 +393,11 @@
       const tx = db.transaction('saves', 'readwrite');
       tx.objectStore('saves').put(buffer, title);
       tx.oncomplete = () => {
-        alert(`Spielstand für "${title}" erfolgreich importiert!\n\n${info.summary || (buffer.length + ' Bytes')}\nSave-Status: ${info.pkhexReady ? '100% Gültig ✅' : 'OK'}\n\nStarte das Spiel neu (oder wähle die ROM im Menü), um ihn zu spielen.`);
+        alert(`Spielstand für "${title}" erfolgreich importiert!\n\n${info.summary || (buffer.length + ' Bytes')}\nPKHeX-Status: ${info.pkhexReady ? '100% Gültig ✅' : 'OK'}\n\nStarte das Spiel neu (oder wähle die ROM im Menü), um ihn zu spielen.`);
         playRetroBlip(880, 'square', 0.12);
         refreshSaveManagerList();
       };
-    } catch(e) {
+    } catch (e) {
       alert('Fehler beim Importieren: ' + e.message);
     }
   }
@@ -353,7 +425,7 @@
           req.onerror = () => r(null);
         });
         if (raw) info = inspectSaveBytes(raw instanceof Uint8Array ? raw : new Uint8Array(raw));
-      } catch(e) {}
+      } catch (e) {}
 
       const isReady = info && info.pkhexReady;
       const isEmpty = info && info.isEmpty;
@@ -363,7 +435,7 @@
           <div style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
             <div style="display:flex; align-items:center; gap:6px;">
               <span style="font-size:12.5px; font-weight:700; color:#cbd5e1;">🎮 ${escapeHtml(title)}</span>
-              ${isReady ? '<span style="font-size:10px; background:#166534; color:#bbf7d0; padding:1px 5px; border-radius:3px; font-weight:700;">Geprüft ✅</span>' : ''}
+              ${isReady ? '<span style="font-size:10px; background:#166534; color:#bbf7d0; padding:1px 5px; border-radius:3px; font-weight:700;">PKHeX ✅</span>' : ''}
               ${isEmpty ? '<span style="font-size:10px; background:#854d0e; color:#fef08a; padding:1px 5px; border-radius:3px; font-weight:700;">Leer (0 KB) ⚠️</span>' : ''}
             </div>
             <button class="retro-btn" style="padding:4px 9px; font-size:11px; ${isReady ? 'background:#16a34a;' : ''}" onclick="window.gbExportSave('${escapeHtml(title)}')">⬇️ .sav (32 KB)</button>
@@ -382,9 +454,14 @@
 
   window.gbExportSave = exportSave;
 
-  // --- 1. Prevent Accidental Page Reload / Navigation ---
+  // --- Prevent Accidental Page Reload / Navigation ---
   window.addEventListener('beforeunload', (e) => {
-    if (currentRomName || currentRoom || isGameInitialized) {
+    if (currentRomName || isGameInitialized) {
+      try {
+        if (window.__gbWorkletNode && window.__gbWorkletNode.port) {
+          window.__gbWorkletNode.port.postMessage({ type: 'requestSave' });
+        }
+      } catch (err) {}
       e.preventDefault();
       e.returnValue = 'Ein Spiel oder eine Multiplayer-Session läuft noch!';
       return e.returnValue;
@@ -396,7 +473,7 @@
     const label = document.getElementById('active-rom-label');
     if (label) {
       if (currentRomName) {
-        label.innerHTML = `Gespeichert: <strong style="color:#48c78e;">${escapeHtml(currentRomName)}</strong> <button id="btn-clear-rom" style="background:none; border:none; color:#ef4444; cursor:pointer; font-size:11px; margin-left:6px;" title="Gespeichertes Spiel leeren">✖ Leeren</button>`;
+        label.innerHTML = `Aktiv: <strong style="color:#48c78e;">${escapeHtml(currentRomName)}</strong> <button id="btn-clear-rom" style="background:none; border:none; color:#ef4444; cursor:pointer; font-size:11px; margin-left:6px;" title="Gespeichertes Spiel leeren">✖ Leeren</button>`;
         const clearBtn = document.getElementById('btn-clear-rom');
         if (clearBtn) {
           clearBtn.onclick = async () => {
@@ -407,109 +484,443 @@
           };
         }
       } else {
-        label.innerHTML = `Kein Spiel zwischengespeichert`;
+        label.innerHTML = `Kein Spiel geladen – wähle oben eine ROM aus!`;
       }
+    }
+  }
+
+  // --- Direct Auto-Link-Cable Engine (connects window.__gbWorkletNode.port to /ws?room=xxxx&direct=1) ---
+  function ensureWorkletSerialHook() {
+    if (workletSerialHooked) return true;
+    if (!window.__gbWorkletNode || !window.__gbWorkletNode.port) return false;
+
+    workletSerialHooked = true;
+    window.__gbWorkletNode.port.addEventListener('message', (e) => {
+      if (e.data && e.data.type === 'serial' && e.data.buffer) {
+        if (linkWs && linkWs.readyState === WebSocket.OPEN && isLinkPaired) {
+          try {
+            linkWs.send(e.data.buffer);
+          } catch (err) {}
+        }
+      }
+    });
+    return true;
+  }
+
+  function connectDirectLinkCable(forceReconnect = false) {
+    if (!currentRoom) return;
+    if (!window.__gbWorkletNode || !window.__gbWorkletNode.port) return;
+
+    ensureWorkletSerialHook();
+
+    if (!forceReconnect && linkWs && (linkWs.readyState === WebSocket.OPEN || linkWs.readyState === WebSocket.CONNECTING) && linkConnectedRoom === currentRoom) {
+      return;
+    }
+
+    if (linkWs) {
+      try { linkWs.close(); } catch (e) {}
+      linkWs = null;
+    }
+
+    linkConnectedRoom = currentRoom;
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${proto}//${window.location.host}/ws?room=${encodeURIComponent(currentRoom)}&direct=1&playerId=${encodeURIComponent(playerId)}`;
+
+    try {
+      const ws = new WebSocket(wsUrl);
+      ws.binaryType = 'arraybuffer';
+      linkWs = ws;
+
+      ws.onopen = () => {
+        sendPartyUpdate();
+      };
+
+      ws.onmessage = (event) => {
+        if (event.data instanceof ArrayBuffer) {
+          if (event.data.byteLength > 0 && window.__gbWorkletNode && window.__gbWorkletNode.port) {
+            window.__gbWorkletNode.port.postMessage(
+              { type: 'serial', buffer: new Uint8Array(event.data) },
+              [event.data]
+            );
+          }
+        } else if (typeof event.data === 'string') {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'LINK_PAIRED') {
+              const wasPaired = isLinkPaired;
+              isLinkPaired = true;
+              linkPeerCount = msg.peers || 2;
+              if (window.__gbWorkletNode && window.__gbWorkletNode.port) {
+                window.__gbWorkletNode.port.postMessage({ type: 'serialConnected' });
+              }
+              updateLinkCableUI();
+              if (!wasPaired) {
+                playRetroBlip(660, 'triangle', 0.08);
+                setTimeout(() => playRetroBlip(880, 'triangle', 0.12), 90);
+                showToast('🔗 Link-Kabel verbunden! (2/2 Spieler bereit)');
+              }
+            } else if (msg.type === 'LINK_WAITING') {
+              isLinkPaired = false;
+              linkPeerCount = msg.peers || 1;
+              if (window.__gbWorkletNode && window.__gbWorkletNode.port) {
+                window.__gbWorkletNode.port.postMessage({ type: 'serialDisconnected' });
+              }
+              updateLinkCableUI();
+            }
+          } catch (e) {}
+        }
+      };
+
+      ws.onclose = () => {
+        if (linkWs === ws) {
+          isLinkPaired = false;
+          if (window.__gbWorkletNode && window.__gbWorkletNode.port) {
+            try { window.__gbWorkletNode.port.postMessage({ type: 'serialDisconnected' }); } catch (e) {}
+          }
+          updateLinkCableUI();
+          clearTimeout(linkReconnectTimer);
+          linkReconnectTimer = setTimeout(() => connectDirectLinkCable(true), 2500);
+        }
+      };
+    } catch (e) {}
+  }
+
+  function updateLinkCableUI() {
+    const topDot = document.getElementById('top-status-dot');
+    const topText = document.getElementById('top-status-text');
+    const banner = document.getElementById('link-cable-banner');
+    const bannerText = document.getElementById('link-cable-banner-text');
+
+    const emuReady = !!(window.__gbWorkletNode && window.__gbWorkletNode.port);
+
+    if (isLinkPaired && emuReady) {
+      if (topDot) topDot.className = 'status-dot connected';
+      if (topText) topText.textContent = 'Link-Kabel aktiv 🐣🐔';
+      if (banner) banner.className = 'link-cable-banner paired';
+      if (bannerText) bannerText.innerHTML = '🟢 <strong>Link-Kabel verbunden!</strong> (Beide Game Boys gekoppelt)';
+    } else if (!emuReady) {
+      if (topDot) topDot.className = 'status-dot waiting';
+      if (topText) topText.textContent = `Party: ${currentRoom} (Starte Emulator)`;
+      if (banner) banner.className = 'link-cable-banner waiting';
+      if (bannerText) bannerText.innerHTML = '🕹️ Klicke links auf <strong>▶ START (AUDIO)</strong>, um das Link-Kabel zu aktivieren';
+    } else {
+      if (topDot) topDot.className = 'status-dot waiting';
+      if (topText) topText.textContent = `Warte auf 2. Game Boy (${currentRoom})...`;
+      if (banner) banner.className = 'link-cable-banner waiting';
+      if (bannerText) bannerText.innerHTML = `🔌 <strong>Link-Kabel bereit</strong> – Warte auf 2. Spieler in Raum <code>${escapeHtml(currentRoom)}</code>...`;
+    }
+  }
+
+  // --- Party-Hub & Live Roster UI Updates (inspired by Treffen) ---
+  function updateHeaderProfileUI() {
+    const avatarEl = document.getElementById('header-user-avatar');
+    const nameEl = document.getElementById('header-user-name');
+    const roleEl = document.getElementById('header-user-role');
+    const roomEl = document.getElementById('header-room-code');
+    const nameInput = document.getElementById('player-name-input');
+
+    if (avatarEl) {
+      avatarEl.textContent = playerAvatar;
+      avatarEl.style.borderColor = playerColor;
+      avatarEl.style.background = `${playerColor}26`;
+    }
+    if (nameEl) nameEl.textContent = playerName;
+    if (roleEl) {
+      if (partyState.isHost) {
+        roleEl.textContent = '👑 Party-Host';
+        roleEl.className = 'user-badge-role is-host';
+      } else {
+        roleEl.textContent = '🎮 Mitspieler';
+        roleEl.className = 'user-badge-role';
+      }
+    }
+    if (roomEl) roomEl.textContent = currentRoom;
+    if (nameInput && document.activeElement !== nameInput) {
+      nameInput.value = playerName;
+    }
+  }
+
+  function renderPartyRoster() {
+    const grid = document.getElementById('party-roster-grid');
+    const countBadge = document.getElementById('party-count-badge');
+    const launchBtn = document.getElementById('btn-party-launch-rom');
+    if (!grid) return;
+
+    const players = partyState.players || [];
+    const count = players.length || 1;
+    if (countBadge) {
+      countBadge.textContent = count === 1 ? '1 Spieler online' : `${count} Spieler online`;
+    }
+
+    if (launchBtn) {
+      if (partyState.isHost) {
+        launchBtn.textContent = '🚀 Für Party starten';
+        launchBtn.title = 'Startet das gewählte Spiel synchron für alle im Raum';
+      } else {
+        launchBtn.textContent = '🎮 Für mich laden';
+        launchBtn.title = 'Lädt das gewählte Spiel in deinen Emulator';
+      }
+    }
+
+    if (players.length === 0) {
+      grid.innerHTML = `
+        <div class="party-player-card is-host">
+          <div class="party-player-avatar" style="background:${playerColor}22; border:2px solid ${playerColor};">
+            ${playerAvatar}
+            <span class="online-dot"></span>
+          </div>
+          <div class="party-player-info">
+            <span class="party-player-name">${escapeHtml(playerName)} 👑 <small style="opacity:0.7;">(Du)</small></span>
+            <span class="party-player-sub">${currentRomName ? '🎮 ' + escapeHtml(currentRomName) : '✅ Bereit in Lobby'}</span>
+          </div>
+        </div>
+      `;
+      return;
+    }
+
+    let html = '';
+    players.forEach(p => {
+      const isMe = p.id === playerId;
+      const col = p.color || '#48c78e';
+      const subText = p.rom
+        ? `🎮 ${escapeHtml(p.rom)} ${p.emulatorReady ? '• 🔗 Aktiv' : ''}`
+        : (p.emulatorReady ? '🕹️ Emulator bereit' : '✅ In der Lobby');
+
+      html += `
+        <div class="party-player-card ${p.isHost ? 'is-host' : ''}">
+          <div class="party-player-avatar" style="background:${escapeHtml(col)}22; border:2px solid ${escapeHtml(col)};">
+            ${escapeHtml(p.avatar || '🎮')}
+            <span class="online-dot"></span>
+          </div>
+          <div class="party-player-info">
+            <span class="party-player-name">
+              ${escapeHtml(p.name)} ${p.isHost ? '👑' : ''} ${isMe ? '<small style="opacity:0.75; font-weight:600;">(Du)</small>' : ''}
+            </span>
+            <span class="party-player-sub">${subText}</span>
+          </div>
+          ${(partyState.isHost && !isMe) ? `
+            <button class="transfer-host-btn" data-transfer-id="${escapeHtml(p.id)}" data-transfer-name="${escapeHtml(p.name)}" title="${escapeHtml(p.name)} zum Party-Host machen">
+              👑 Host
+            </button>
+          ` : ''}
+        </div>
+      `;
+    });
+
+    grid.innerHTML = html;
+
+    grid.querySelectorAll('.transfer-host-btn').forEach(btn => {
+      btn.onclick = () => {
+        const targetId = btn.getAttribute('data-transfer-id');
+        const targetName = btn.getAttribute('data-transfer-name');
+        if (targetId && confirm(`Möchtest du die Party-Host-Rolle (👑) an "${targetName}" übergeben?`)) {
+          if (chatWs && chatWs.readyState === WebSocket.OPEN) {
+            chatWs.send(JSON.stringify({
+              type: 'TRANSFER_HOST',
+              targetPlayerId: targetId
+            }));
+          }
+        }
+      };
+    });
+  }
+
+  function sendPartyUpdate() {
+    if (!chatWs || chatWs.readyState !== WebSocket.OPEN) return;
+    const emuReady = !!(window.__gbWorkletNode && window.__gbWorkletNode.port);
+    chatWs.send(JSON.stringify({
+      type: 'UPDATE_USER',
+      user: {
+        id: playerId,
+        name: playerName,
+        avatar: playerAvatar,
+        color: playerColor,
+        rom: currentRomName,
+        emulatorReady: emuReady,
+        isReady: true
+      }
+    }));
+  }
+
+  // Switch to any room code cleanly (syncs URL, Party-Couch, Chat & Auto-Link-Cable)
+  function switchRoom(newCode) {
+    const clean = normalizeRoomCode(newCode);
+    if (!clean) return;
+
+    currentRoom = clean;
+    localStorage.setItem('gb_last_room', clean);
+
+    try {
+      const u = new URL(window.location.href);
+      u.searchParams.set('room', clean);
+      window.history.replaceState({ room: clean }, '', u.toString());
+    } catch (e) {}
+
+    updateHeaderProfileUI();
+    connectChat(clean, true);
+    connectDirectLinkCable(true);
+    updateLinkCableUI();
+    showToast(`🎉 Raum gewechselt: ${clean}`);
+  }
+
+  async function loadServerRomByName(romName, showNotification = true) {
+    if (!romName) return;
+    try {
+      const select = document.getElementById('sidebar-rom-select');
+      if (select) select.value = romName;
+
+      const resp = await fetch(`/api/roms/${encodeURIComponent(romName)}`);
+      if (!resp.ok) throw new Error('ROM nicht gefunden');
+      const blob = await resp.blob();
+      const buffer = await blob.arrayBuffer();
+      await saveSessionRom(romName, buffer);
+      feedRomToEmulator(buffer, romName);
+      playRetroBlip(880, 'triangle', 0.12);
+      if (showNotification) {
+        showToast(`🎮 "${romName}" geladen!`);
+      }
+    } catch (e) {
+      alert('Fehler beim Laden der ROM: ' + e.message);
     }
   }
 
   // Initialize UI layout
   function initLayout() {
-    // Top bar
     if (!document.getElementById('retro-header')) {
       const header = document.createElement('header');
       header.id = 'retro-header';
       header.className = 'retro-top-bar';
       header.innerHTML = `
-        <div class="retro-logo">
-          <span class="retro-logo-icon">🎮</span>
-          <span class="retro-logo-text">GAME BOY ONLINE</span>
+        <div class="header-left-group">
+          <div class="retro-logo">
+            <span class="retro-logo-icon">🎮</span>
+            <span class="retro-logo-text">GAME BOY PARTY</span>
+          </div>
+
+          <!-- Treffen-inspired Room Pill -->
+          <div class="room-pill" title="Aktueller 4-stelliger Party- & Link-Kabel-Code">
+            <span class="status-dot connected" id="live-party-dot" title="Party-Server verbunden"></span>
+            <div class="room-pill-code-box" id="header-room-code-box" title="Klicken zum Kopieren des Einladungslinks">
+              <span class="room-pill-label">Code:</span>
+              <span class="room-pill-code" id="header-room-code">${escapeHtml(currentRoom)}</span>
+            </div>
+            <div class="room-pill-actions">
+              <button class="pill-icon-btn" id="pill-copy-btn" title="Einladungslink kopieren">📋</button>
+              <button class="pill-icon-btn" id="pill-qr-btn" title="QR-Code für Freunde anzeigen">📱</button>
+              <button class="pill-icon-btn" id="pill-switch-room-btn" title="Freundescode eingeben / Raum wechseln">✏️</button>
+              <button class="pill-icon-btn" id="pill-new-room-btn" title="Neuen 4-stelligen Raum-Code würfeln">🎲</button>
+            </div>
+          </div>
         </div>
+
         <div class="retro-top-badges">
           <div class="room-status-badge" id="top-status-badge">
             <span class="status-dot waiting" id="top-status-dot"></span>
-            <span id="top-status-text">Lobby bereit</span>
+            <span id="top-status-text">Link-Kabel bereit</span>
+          </div>
+
+          <div class="user-profile-badge" id="header-user-badge" title="Spieler-Profil & Avatar anpassen">
+            <div class="user-avatar-circle" id="header-user-avatar">${escapeHtml(playerAvatar)}</div>
+            <div class="user-badge-info">
+              <span class="user-badge-name" id="header-user-name">${escapeHtml(playerName)}</span>
+              <span class="user-badge-role is-host" id="header-user-role">👑 Party-Host</span>
+            </div>
           </div>
         </div>
       `;
       document.body.prepend(header);
     }
 
-    // Wrap root into flex layout
     const root = document.getElementById('root');
     if (root && !document.getElementById('main-retro-layout')) {
       const mainLayout = document.createElement('div');
       mainLayout.id = 'main-retro-layout';
       mainLayout.className = 'main-layout';
 
-      // Left column: Game Boy Console
       const leftCol = document.createElement('div');
       leftCol.id = 'left-console-col';
       leftCol.className = 'console-column';
 
-      // Right column: Dashboard & Chat
       const rightCol = document.createElement('div');
       rightCol.id = 'right-dashboard-col';
       rightCol.className = 'dashboard-panel';
       rightCol.innerHTML = `
-        <!-- Matchmaking & Freundescode Card -->
+        <!-- Treffen-inspired Party-Couch & Matchmaking Card -->
         <div class="retro-card">
-          <div class="retro-card-title"><span>📡</span> Freundescode & Matchmaking</div>
-          <div class="room-quick-bar">
-            <span class="room-code-tag" id="active-room-display">KEIN RAUM</span>
-            <button class="retro-btn" id="btn-copy-invite">📋 Link kopieren</button>
-            <button class="retro-btn retro-btn-secondary" id="btn-open-settings">⚙️ Raum / Einstellungen</button>
+          <div class="couch-header-row">
+            <div class="retro-card-title" style="margin-bottom:0;">
+              <span>🛋️</span> Party-Couch <span class="couch-badge" id="party-count-badge">1 Spieler online</span>
+            </div>
+            <div style="display:flex; gap:6px;">
+              <button class="retro-btn" id="btn-copy-invite" style="padding:5px 10px; font-size:11.5px;">📋 Einladen</button>
+              <button class="retro-btn retro-btn-secondary" id="btn-open-room-modal" style="padding:5px 10px; font-size:11.5px;">🔑 Code eingeben</button>
+              <button class="retro-btn retro-btn-secondary" id="btn-open-settings" style="padding:5px 9px; font-size:11.5px;" title="Erweiterte Emulator-Einstellungen">⚙️</button>
+            </div>
           </div>
+
+          <!-- Auto Link-Cable Status Banner -->
+          <div class="link-cable-banner waiting" id="link-cable-banner">
+            <span id="link-cable-banner-text">🔌 <strong>Link-Kabel bereit</strong> – Verbindet automatisch, sobald 2 Spieler im Raum sind!</span>
+            <button class="retro-btn retro-btn-secondary" id="btn-reconnect-link" style="padding:4px 8px; font-size:10.5px; white-space:nowrap;" title="Link-Kabel neu synchronisieren">🔄 Sync</button>
+          </div>
+
+          <!-- Live Player Roster -->
+          <div class="player-roster-grid" id="party-roster-grid"></div>
+
+          <!-- Synchronized ROM Selector & Party Launch -->
           <div class="rom-selector-row">
-            <span style="font-size:13px; font-weight:700;">🎮 Spiel:</span>
+            <span style="font-size:12.5px; font-weight:700; white-space:nowrap;">🎮 Spiel:</span>
             <select class="rom-select-box" id="sidebar-rom-select">
               <option value="">-- Server-ROM wählen --</option>
             </select>
+            <button class="retro-btn" id="btn-party-launch-rom" style="padding:8px 12px; font-size:12px; white-space:nowrap;">
+              🚀 Für Party starten
+            </button>
           </div>
           <div id="active-rom-label" style="font-size:11.5px; color:#94a3b8; margin-top:8px;"></div>
         </div>
 
         <!-- Spielstand (.sav) Manager Card -->
         <div class="retro-card">
-          <details id="admin-save-panel"><summary class="retro-card-title" style="cursor:pointer; list-style:none;"><span>⚙️</span> Admin / Spielstand-Manager ▾</summary><div style="padding-top:10px;">
-          <div style="font-size:12px; color:#94a3b8; margin-bottom:10px; line-height:1.4;">
-            Erzeugt echte <strong>32 KB Battery-SRAM .sav</strong> Dateien für externe Emulatoren. (Immer erst im Spiel <em>START &rarr; SICHERN</em> ausführen!)
-          </div>
-          <div id="save-manager-content" style="margin-bottom:12px;"></div>
-          <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
-            <button id="btn-force-save-sync" class="retro-btn" style="font-size:11px; padding:6px 10px; background:#2563eb;" title="Synchronisiert den Emulator-RAM sofort in den Browser">
-              🔄 Emulator sichern (Sync)
-            </button>
-            <label class="retro-btn retro-btn-secondary" style="cursor:pointer; display:inline-flex; align-items:center; gap:4px; font-size:11px; padding:6px 10px;">
-              ⬆️ .sav importieren
-              <input type="file" id="input-import-sav-file" accept=".sav,.bin" style="display:none;">
-            </label>
-            <details style="margin-top: 10px; border-top: 1px solid #334155; padding-top: 10px;">
-              <summary style="font-size: 11px; color: #64748b; cursor: pointer; user-select: none;">Erweiterte Admin-Optionen</summary>
-              <div style="margin-top: 8px;">
-                <button id="btn-load-demo-save" class="retro-btn retro-btn-secondary" style="font-size:10px; padding:6px 9px; border-color:#eab308; color:#fde047;" title="Lädt einen vorgefertigten Pokémon Rot Spielstand zum Testen">
-                  ⭐ Demo-Spielstand laden
+          <details id="admin-save-panel">
+            <summary class="retro-card-title" style="cursor:pointer; list-style:none; margin-bottom:0;">
+              <span>💾</span> Spielstand (.sav) & PKHeX Manager ▾
+            </summary>
+            <div style="padding-top:12px;">
+              <div style="font-size:12px; color:#94a3b8; margin-bottom:10px; line-height:1.4;">
+                Erzeugt echte <strong>32 KB Battery-SRAM .sav</strong> Dateien für PKHeX & externe Emulatoren. (Immer erst im Spiel <em>START &rarr; SICHERN</em> ausführen!)
+              </div>
+              <div id="save-manager-content" style="margin-bottom:12px;"></div>
+              <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+                <button id="btn-force-save-sync" class="retro-btn" style="font-size:11px; padding:6px 10px; background:#2563eb;" title="Synchronisiert den Emulator-RAM sofort in den Browser">
+                  🔄 Emulator sichern (Sync)
+                </button>
+                <label class="retro-btn retro-btn-secondary" style="cursor:pointer; display:inline-flex; align-items:center; gap:4px; font-size:11px; padding:6px 10px;">
+                  ⬆️ .sav importieren
+                  <input type="file" id="input-import-sav-file" accept=".sav,.bin" style="display:none;">
+                </label>
+                <button id="btn-load-demo-save" class="retro-btn retro-btn-secondary" style="font-size:11px; padding:6px 9px; border-color:#eab308; color:#fde047;" title="Lädt einen vorgefertigten Pokémon Rot Spielstand zum Testen in PKHeX">
+                  ⭐ PKHeX Teststand
                 </button>
               </div>
-            </details>
-          </div>
+            </div>
+          </details>
         </div>
 
-        </details>
         <!-- Live Chat Card -->
         <div class="retro-card chat-container">
           <div class="chat-header-bar">
-            <div class="retro-card-title" style="margin-bottom:0;"><span>💬</span> Live-Chat</div>
+            <div class="retro-card-title" style="margin-bottom:0;"><span>💬</span> Party-Chat</div>
             <div style="display:flex; align-items:center; gap:6px;">
               <span style="font-size:11px; color:#94a3b8;">Name:</span>
-              <input type="text" id="player-name-input" value="${playerName}" style="background:#0f131a; border:1px solid #334155; color:#fff; border-radius:4px; padding:2px 6px; font-size:12px; width:110px;">
+              <input type="text" id="player-name-input" value="${escapeHtml(playerName)}" style="background:#0f131a; border:1px solid #334155; color:#fff; border-radius:4px; padding:2px 6px; font-size:12px; width:110px;">
             </div>
           </div>
           <div class="chat-messages" id="chat-messages-list">
             <div class="chat-msg system">
-              <div class="chat-bubble">Willkommen im Chat! Tritt einem Raum bei, um mit deinem Freund zu schreiben.</div>
+              <div class="chat-bubble">Willkommen in Raum <strong>${escapeHtml(currentRoom)}</strong>! Teile den Link oder Code mit deinem Mitspieler.</div>
             </div>
           </div>
-          <!-- Quick Reactions -->
           <div class="quick-reactions">
             <button class="reaction-btn" data-msg="🎮 Bereit!">🎮 Bereit!</button>
             <button class="reaction-btn" data-msg="🔄 Tausch bereit!">🔄 Tausch!</button>
@@ -518,9 +929,8 @@
             <button class="reaction-btn" data-msg="🔥 Noch eine Runde!">🔥 Revanche!</button>
             <button class="reaction-btn" data-msg="⏰ Moment...">⏰ Moment...</button>
           </div>
-          <!-- Input -->
           <div class="chat-input-row">
-            <input type="text" class="chat-input-box" id="chat-input" placeholder="Nachricht eingeben...">
+            <input type="text" class="chat-input-box" id="chat-input" placeholder="Nachricht an deine Party...">
             <button class="chat-send-btn" id="chat-send-btn">Senden</button>
           </div>
         </div>
@@ -530,8 +940,8 @@
           <div class="retro-card-title"><span>⌨️</span> Tastatur-Steuerung</div>
           <div class="controls-legend">
             <div class="key-badge-card"><span class="key-cap">⬅️⬆️⬇️➡️</span><span class="key-desc">D-Pad</span></div>
-            <div class="key-badge-card"><span class="key-cap">A</span><span class="key-desc">A-Knopf</span></div>
-            <div class="key-badge-card"><span class="key-cap">B</span><span class="key-desc">B-Knopf</span></div>
+            <div class="key-badge-card"><span class="key-cap">A / J</span><span class="key-desc">A-Knopf</span></div>
+            <div class="key-badge-card"><span class="key-cap">B / K</span><span class="key-desc">B-Knopf</span></div>
             <div class="key-badge-card"><span class="key-cap">Enter</span><span class="key-desc">Start</span></div>
             <div class="key-badge-card"><span class="key-cap">Backspace</span><span class="key-desc">Select</span></div>
           </div>
@@ -543,61 +953,224 @@
       mainLayout.appendChild(rightCol);
       document.body.appendChild(mainLayout);
 
+      injectModals();
       wireEvents();
+      updateHeaderProfileUI();
+      renderPartyRoster();
       updateRomDisplay();
       refreshSaveManagerList();
+      connectChat(currentRoom);
     }
   }
 
-  // Connect to live chat WebSocket
-  function connectChat(roomName) {
+  function injectModals() {
+    if (document.getElementById('party-qr-modal')) return;
+
+    const modalsWrapper = document.createElement('div');
+    modalsWrapper.innerHTML = `
+      <!-- 1. QR-Code & Invite Modal -->
+      <div class="party-modal-backdrop" id="party-qr-modal">
+        <div class="party-modal-card" style="text-align:center;">
+          <button class="party-modal-close" data-close-modal="party-qr-modal">✕</button>
+          <div style="font-size:32px; margin-bottom:6px;">📱</div>
+          <h3 style="margin:0 0 6px 0; font-size:18px; color:#f8fafc;">Freunde zur Party einladen</h3>
+          <p style="margin:0 0 14px 0; font-size:13px; color:#94a3b8;">Scanne den QR-Code oder teile den 4-stelligen Freundescode:</p>
+          <div style="background:#10141d; border:1.5px solid #2e3646; border-radius:12px; padding:10px; display:inline-block; margin-bottom:12px;">
+            <img id="party-qr-img" src="" alt="QR Code" style="width:170px; height:170px; border-radius:8px; display:block;">
+          </div>
+          <div style="margin-bottom:14px;">
+            <span style="font-size:11px; color:#94a3b8; display:block; margin-bottom:4px;">PARTY- & LINK-KABEL-CODE</span>
+            <span id="party-qr-code-text" style="font-family:'Press Start 2P', monospace; font-size:20px; color:#48c78e; letter-spacing:3px;">${escapeHtml(currentRoom)}</span>
+          </div>
+          <div style="display:flex; gap:8px;">
+            <input type="text" id="party-qr-url-input" readonly style="flex:1; background:#10141d; border:1px solid #334155; color:#cbd5e1; border-radius:8px; padding:8px 10px; font-size:12px;">
+            <button class="retro-btn" id="party-qr-copy-btn">📋 Kopieren</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. Switch Room / Enter Friend Code Modal -->
+      <div class="party-modal-backdrop" id="party-room-modal">
+        <div class="party-modal-card">
+          <button class="party-modal-close" data-close-modal="party-room-modal">✕</button>
+          <div style="font-size:28px; margin-bottom:6px;">🔑</div>
+          <h3 style="margin:0 0 6px 0; font-size:18px; color:#f8fafc;">Raum wechseln / Freundescode</h3>
+          <p style="margin:0 0 14px 0; font-size:13px; color:#94a3b8;">Gib den 4-stelligen Code deines Freundes ein (Kleinbuchstaben & Zahlen, ohne 'o'):</p>
+          <div style="display:flex; gap:8px; margin-bottom:14px;">
+            <input type="text" id="party-room-input" maxlength="8" placeholder="z.B. k7p4" style="flex:1; background:#10141d; border:1.5px solid #334155; color:#48c78e; border-radius:10px; padding:10px 14px; font-family:'Press Start 2P', monospace; font-size:14px; text-transform:lowercase; outline:none;">
+            <button class="retro-btn" id="party-room-join-btn">Beitreten</button>
+          </div>
+          <div style="border-top:1px solid #283040; padding-top:12px; display:flex; justify-content:space-between; align-items:center;">
+            <span style="font-size:12px; color:#94a3b8;">Oder neuen Raum erstellen:</span>
+            <button class="retro-btn retro-btn-secondary" id="party-room-random-btn" style="font-size:12px; padding:7px 12px;">🎲 Neuer 4er-Code</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3. Player Profile & Avatar Picker Modal -->
+      <div class="party-modal-backdrop" id="party-profile-modal">
+        <div class="party-modal-card">
+          <button class="party-modal-close" data-close-modal="party-profile-modal">✕</button>
+          <div style="font-size:28px; margin-bottom:6px;">✏️</div>
+          <h3 style="margin:0 0 4px 0; font-size:18px; color:#f8fafc;">Dein Spieler-Profil</h3>
+          <p style="margin:0 0 14px 0; font-size:12.5px; color:#94a3b8;">Wähle deinen Namen und deinen Avatar für die Party-Couch:</p>
+          <div style="margin-bottom:14px;">
+            <label style="font-size:12px; font-weight:700; color:#cbd5e1; display:block; margin-bottom:6px;">Dein Name:</label>
+            <input type="text" id="party-profile-name-input" maxlength="18" value="${escapeHtml(playerName)}" style="width:100%; background:#10141d; border:1.5px solid #334155; color:#fff; border-radius:10px; padding:9px 12px; font-size:14px; font-weight:700; outline:none;">
+          </div>
+          <div style="margin-bottom:18px;">
+            <label style="font-size:12px; font-weight:700; color:#cbd5e1; display:block; margin-bottom:6px;">Wähle deinen Avatar:</label>
+            <div class="avatar-picker-grid" id="party-avatar-grid"></div>
+          </div>
+          <div style="display:flex; justify-content:flex-end; gap:8px;">
+            <button class="retro-btn retro-btn-secondary" data-close-modal="party-profile-modal">Abbrechen</button>
+            <button class="retro-btn" id="party-profile-save-btn">💾 Profil speichern</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modalsWrapper);
+  }
+
+  function openQrModal() {
+    const modal = document.getElementById('party-qr-modal');
+    if (!modal) return;
+    const inviteUrl = `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(currentRoom)}`;
+    const qrImg = document.getElementById('party-qr-img');
+    const codeText = document.getElementById('party-qr-code-text');
+    const urlInput = document.getElementById('party-qr-url-input');
+    if (qrImg) qrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(inviteUrl)}`;
+    if (codeText) codeText.textContent = currentRoom;
+    if (urlInput) urlInput.value = inviteUrl;
+    modal.classList.add('open');
+  }
+
+  function openRoomModal() {
+    const modal = document.getElementById('party-room-modal');
+    const input = document.getElementById('party-room-input');
+    if (!modal) return;
+    if (input) {
+      input.value = '';
+      setTimeout(() => input.focus(), 100);
+    }
+    modal.classList.add('open');
+  }
+
+  let selectedTempAvatar = playerAvatar;
+  function openProfileModal() {
+    const modal = document.getElementById('party-profile-modal');
+    const nameInput = document.getElementById('party-profile-name-input');
+    const grid = document.getElementById('party-avatar-grid');
+    if (!modal) return;
+
+    selectedTempAvatar = playerAvatar;
+    if (nameInput) nameInput.value = playerName;
+
+    if (grid) {
+      grid.innerHTML = '';
+      ALL_AVATARS.forEach(emoji => {
+        const div = document.createElement('div');
+        div.className = `avatar-pick-item ${emoji === selectedTempAvatar ? 'selected' : ''}`;
+        div.textContent = emoji;
+        div.onclick = () => {
+          grid.querySelectorAll('.avatar-pick-item').forEach(el => el.classList.remove('selected'));
+          div.classList.add('selected');
+          selectedTempAvatar = emoji;
+        };
+        grid.appendChild(div);
+      });
+    }
+
+    modal.classList.add('open');
+  }
+
+  // Connect to Party-Hub & Live Chat WebSocket (/chat)
+  function connectChat(roomName, force = false) {
     if (!roomName) return;
-    const cleanRoom = roomName.trim().toLowerCase();
-    if (chatWs && chatWs.readyState === WebSocket.OPEN && currentRoom === cleanRoom) return;
+    const cleanRoom = normalizeRoomCode(roomName) || 'lobby';
+    if (!force && chatWs && chatWs.readyState === WebSocket.OPEN && currentRoom === cleanRoom) return;
 
     if (chatWs) {
-      chatWs.close();
+      try { chatWs.close(); } catch (e) {}
+      chatWs = null;
     }
 
     currentRoom = cleanRoom;
     localStorage.setItem('gb_last_room', cleanRoom);
-
-    // Keep URL synchronized so F5/reload immediately keeps the room!
-    const newUrl = `${window.location.pathname}?room=${encodeURIComponent(cleanRoom)}`;
-    if (window.location.search !== `?room=${cleanRoom}`) {
-      window.history.replaceState(null, '', newUrl);
-    }
+    updateHeaderProfileUI();
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const chatUrl = `${protocol}//${window.location.host}/chat?room=${encodeURIComponent(cleanRoom)}&name=${encodeURIComponent(playerName)}`;
+    const chatUrl = `${protocol}//${window.location.host}/chat?room=${encodeURIComponent(cleanRoom)}&name=${encodeURIComponent(playerName)}&avatar=${encodeURIComponent(playerAvatar)}&color=${encodeURIComponent(playerColor)}&playerId=${encodeURIComponent(playerId)}`;
 
     try {
-      chatWs = new WebSocket(chatUrl);
+      const ws = new WebSocket(chatUrl);
+      chatWs = ws;
 
-      chatWs.onopen = () => {
-        addChatMessage({
-          type: 'system',
-          text: `Chat verbunden für Raum "${cleanRoom}"!`,
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        });
+      ws.onopen = () => {
+        const liveDot = document.getElementById('live-party-dot');
+        if (liveDot) liveDot.className = 'status-dot connected';
+        sendPartyUpdate();
       };
 
-      chatWs.onmessage = (event) => {
+      ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
+          if (!msg || !msg.type) return;
+
+          if (msg.type === 'ROSTER_SYNC') {
+            partyState.players = Array.isArray(msg.players) ? msg.players : [];
+            partyState.hostId = msg.hostId || null;
+            partyState.isHost = (partyState.hostId === playerId);
+            if (msg.selectedRom && !partyState.selectedRom) {
+              partyState.selectedRom = msg.selectedRom;
+            }
+            updateHeaderProfileUI();
+            renderPartyRoster();
+            return;
+          }
+
+          if (msg.type === 'HOST_TRANSFERRED') {
+            partyState.hostId = msg.newHostId;
+            partyState.isHost = (msg.newHostId === playerId);
+            updateHeaderProfileUI();
+            renderPartyRoster();
+            if (partyState.isHost) {
+              showToast('👑 Du bist jetzt der Party-Host!');
+            }
+            return;
+          }
+
+          if (msg.type === 'PARTY_LAUNCH_ROM') {
+            if (msg.rom) {
+              showToast(`🚀 ${msg.initiatedBy || 'Host'} startet ${msg.rom}!`);
+              loadServerRomByName(msg.rom, false);
+            }
+            return;
+          }
+
           if (msg.type === 'history') {
+            const chatList = document.getElementById('chat-messages-list');
+            if (chatList) chatList.innerHTML = '';
             msg.messages.forEach(m => addChatMessage(m, false));
-          } else {
+          } else if (msg.type === 'chat' || msg.type === 'system') {
             addChatMessage(msg, true);
           }
-        } catch(e) {}
+        } catch (e) {}
       };
-    } catch(e) {
-      console.error('Chat connection error:', e);
+
+      ws.onclose = () => {
+        if (chatWs === ws) {
+          const liveDot = document.getElementById('live-party-dot');
+          if (liveDot) liveDot.className = 'status-dot waiting';
+          clearTimeout(chatReconnectTimer);
+          chatReconnectTimer = setTimeout(() => connectChat(currentRoom, true), 2500);
+        }
+      };
+    } catch (e) {
+      console.error('Party/Chat connection error:', e);
     }
   }
 
-  // Add chat message to UI
   function addChatMessage(msg, playSound = true) {
     const chatList = document.getElementById('chat-messages-list');
     if (!chatList) return;
@@ -610,9 +1183,10 @@
       div.innerHTML = `<div class="chat-bubble">${escapeHtml(msg.text)}</div>`;
     } else {
       div.className = `chat-msg ${isMine ? 'mine' : 'theirs'}`;
+      const avatarPrefix = msg.avatar ? `${escapeHtml(msg.avatar)} ` : '';
       div.innerHTML = `
         <div class="chat-bubble">
-          ${!isMine ? `<strong style="display:block; font-size:11px; color:#38bdf8; margin-bottom:2px;">${escapeHtml(msg.sender)}</strong>` : ''}
+          ${!isMine ? `<strong style="display:block; font-size:11px; color:${escapeHtml(msg.color || '#38bdf8')}; margin-bottom:2px;">${avatarPrefix}${escapeHtml(msg.sender)}</strong>` : ''}
           ${escapeHtml(msg.text)}
         </div>
         <div class="chat-meta">${msg.time || ''}</div>
@@ -630,11 +1204,10 @@
 
   function escapeHtml(text) {
     const p = document.createElement('p');
-    p.textContent = text;
+    p.textContent = text || '';
     return p.innerHTML;
   }
 
-  // Inject a ROM into the React emulator file input
   function feedRomToEmulator(arrayBuffer, fileName) {
     const file = new File([arrayBuffer], fileName, { type: 'application/octet-stream' });
     const fileInput = document.querySelector('input[type="file"]');
@@ -644,27 +1217,130 @@
       fileInput.files = dt.files;
       fileInput.dispatchEvent(new Event('change', { bubbles: true }));
       isGameInitialized = true;
+      setTimeout(() => {
+        connectDirectLinkCable(false);
+        sendPartyUpdate();
+      }, 300);
       return true;
     }
     return false;
   }
 
-  // Wire buttons & events
+  function copyInviteLink() {
+    const inviteUrl = `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(currentRoom)}`;
+    navigator.clipboard.writeText(inviteUrl).then(() => {
+      playRetroBlip(700, 'triangle', 0.08);
+      showToast(`📋 Einladungslink kopiert! (Code: ${currentRoom})`);
+    });
+  }
+
   function wireEvents() {
-    // Copy invite link
+    // Modal close buttons & backdrop click
+    document.querySelectorAll('[data-close-modal]').forEach(btn => {
+      btn.onclick = () => {
+        const id = btn.getAttribute('data-close-modal');
+        const m = document.getElementById(id);
+        if (m) m.classList.remove('open');
+      };
+    });
+
+    document.querySelectorAll('.party-modal-backdrop').forEach(backdrop => {
+      backdrop.onclick = (e) => {
+        if (e.target === backdrop) backdrop.classList.remove('open');
+      };
+    });
+
+    // Header Room Pill actions
+    const codeBox = document.getElementById('header-room-code-box');
+    if (codeBox) codeBox.onclick = copyInviteLink;
+
+    const pillCopy = document.getElementById('pill-copy-btn');
+    if (pillCopy) pillCopy.onclick = copyInviteLink;
+
     const copyBtn = document.getElementById('btn-copy-invite');
-    if (copyBtn) {
-      copyBtn.onclick = () => {
-        if (!currentRoom) {
-          alert('Bitte erstelle zuerst einen Raum (⚙️ Raum / Einstellungen) oder tritt einem bei!');
-          return;
-        }
-        const inviteUrl = `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(currentRoom)}`;
-        navigator.clipboard.writeText(inviteUrl).then(() => {
-          copyBtn.innerHTML = '✅ Kopiert!';
-          playRetroBlip(700, 'triangle', 0.08);
-          setTimeout(() => { copyBtn.innerHTML = '📋 Link kopieren'; }, 2000);
-        });
+    if (copyBtn) copyBtn.onclick = copyInviteLink;
+
+    const pillQr = document.getElementById('pill-qr-btn');
+    if (pillQr) pillQr.onclick = openQrModal;
+
+    const qrCopyBtn = document.getElementById('party-qr-copy-btn');
+    if (qrCopyBtn) qrCopyBtn.onclick = copyInviteLink;
+
+    const pillSwitch = document.getElementById('pill-switch-room-btn');
+    if (pillSwitch) pillSwitch.onclick = openRoomModal;
+
+    const openRoomBtn = document.getElementById('btn-open-room-modal');
+    if (openRoomBtn) openRoomBtn.onclick = openRoomModal;
+
+    const pillNewRoom = document.getElementById('pill-new-room-btn');
+    if (pillNewRoom) {
+      pillNewRoom.onclick = () => {
+        const nextCode = generateRoomCode(4);
+        playRetroBlip(620, 'triangle', 0.08);
+        switchRoom(nextCode);
+      };
+    }
+
+    // Room Modal actions
+    const roomJoinBtn = document.getElementById('party-room-join-btn');
+    const roomInput = document.getElementById('party-room-input');
+    const doJoinRoom = () => {
+      if (!roomInput) return;
+      const code = normalizeRoomCode(roomInput.value);
+      if (!code) {
+        alert('Bitte gib einen gültigen Raum-Code ein!');
+        return;
+      }
+      document.getElementById('party-room-modal')?.classList.remove('open');
+      switchRoom(code);
+    };
+    if (roomJoinBtn) roomJoinBtn.onclick = doJoinRoom;
+    if (roomInput) {
+      roomInput.onkeydown = (e) => {
+        if (e.key === 'Enter') doJoinRoom();
+      };
+    }
+
+    const roomRandomBtn = document.getElementById('party-room-random-btn');
+    if (roomRandomBtn) {
+      roomRandomBtn.onclick = () => {
+        document.getElementById('party-room-modal')?.classList.remove('open');
+        switchRoom(generateRoomCode(4));
+      };
+    }
+
+    // Profile Modal actions
+    const userBadge = document.getElementById('header-user-badge');
+    if (userBadge) userBadge.onclick = openProfileModal;
+
+    const profileSaveBtn = document.getElementById('party-profile-save-btn');
+    if (profileSaveBtn) {
+      profileSaveBtn.onclick = () => {
+        const nameEl = document.getElementById('party-profile-name-input');
+        const newName = (nameEl && nameEl.value.trim()) ? nameEl.value.trim().slice(0, 18) : playerName;
+        playerName = newName;
+        playerAvatar = selectedTempAvatar || playerAvatar;
+        const foundPreset = AVATAR_POOL.find(p => p.avatar === playerAvatar);
+        if (foundPreset) playerColor = foundPreset.color;
+
+        localStorage.setItem('gb_player_name', playerName);
+        localStorage.setItem('gb_player_avatar', playerAvatar);
+        localStorage.setItem('gb_player_color', playerColor);
+
+        document.getElementById('party-profile-modal')?.classList.remove('open');
+        updateHeaderProfileUI();
+        sendPartyUpdate();
+        showToast(`Profil gespeichert: ${playerAvatar} ${playerName}`);
+      };
+    }
+
+    // Link-Cable Manual Sync button
+    const reconnectLinkBtn = document.getElementById('btn-reconnect-link');
+    if (reconnectLinkBtn) {
+      reconnectLinkBtn.onclick = () => {
+        playRetroBlip(540, 'triangle', 0.08);
+        connectDirectLinkCable(true);
+        showToast('🔄 Link-Kabel wird synchronisiert...');
       };
     }
 
@@ -684,7 +1360,7 @@
       };
     }
 
-    // Force save flush (sync worklet RAM to IndexedDB)
+    // Force save flush
     const syncBtn = document.getElementById('btn-force-save-sync');
     if (syncBtn) {
       syncBtn.onclick = async () => {
@@ -714,17 +1390,17 @@
           const tx = db.transaction('saves', 'readwrite');
           tx.objectStore('saves').put(buf, 'POKEMON RED');
           tx.oncomplete = () => {
-            alert('⭐ Test-Spielstand für "Pokémon Rot" erfolgreich aktiviert!\n\nTrainer: ROT\nStarter: Glumanda\nStatus: 100% kompatibel (32.768 Bytes).\n\nDu kannst ihn jetzt mit "⬇️ .sav" herunterladen und in externen Emulatoren öffnen oder im Spiel weiterspielen!');
+            alert('⭐ Test-Spielstand für "Pokémon Rot" erfolgreich aktiviert!\n\nTrainer: ROT\nStarter: Glumanda\nStatus: 100% PKHeX-kompatibel (32.768 Bytes).\n\nDu kannst ihn jetzt mit "⬇️ .sav" herunterladen und in PKHeX öffnen oder im Spiel weiterspielen!');
             playRetroBlip(880, 'square', 0.15);
             refreshSaveManagerList();
           };
-        } catch(e) {
+        } catch (e) {
           alert('Fehler: ' + e.message);
         }
       };
     }
 
-    // Smart Import .sav file with automatic format & game detection
+    // Smart Import .sav file
     const importInput = document.getElementById('input-import-sav-file');
     if (importInput) {
       importInput.onchange = async (e) => {
@@ -732,7 +1408,6 @@
         if (!file) return;
         try {
           let buffer = new Uint8Array(await file.arrayBuffer());
-          // Handle RTC footer or padding: if 32812 bytes, trim to 32768
           if (buffer.length === 32812) {
             buffer = buffer.slice(0, 32768);
           } else if (buffer.length < 32768) {
@@ -753,20 +1428,21 @@
             targetTitle = targetTitle.trim().toUpperCase();
             await importSave(targetTitle, file);
           }
-        } catch(err) {
+        } catch (err) {
           alert('Fehler beim Importieren: ' + err.message);
         }
         importInput.value = '';
       };
     }
 
-    // Player name input
+    // Player name input in chat bar
     const nameInput = document.getElementById('player-name-input');
     if (nameInput) {
       nameInput.onchange = () => {
         playerName = nameInput.value.trim() || 'Spieler';
         localStorage.setItem('gb_player_name', playerName);
-        if (currentRoom) connectChat(currentRoom);
+        updateHeaderProfileUI();
+        sendPartyUpdate();
       };
     }
 
@@ -778,10 +1454,16 @@
       const text = chatInput.value.trim();
       if (!text) return;
       if (!chatWs || chatWs.readyState !== WebSocket.OPEN) {
-        addChatMessage({ type: 'system', text: 'Chat noch nicht verbunden. Tritt erst einem Raum bei!' });
+        connectChat(currentRoom, true);
         return;
       }
-      chatWs.send(JSON.stringify({ type: 'chat', text, sender: playerName }));
+      chatWs.send(JSON.stringify({
+        type: 'chat',
+        text,
+        sender: playerName,
+        avatar: playerAvatar,
+        color: playerColor
+      }));
       chatInput.value = '';
       playRetroBlip(440, 'square', 0.04);
     };
@@ -798,16 +1480,22 @@
       btn.onclick = () => {
         const text = btn.getAttribute('data-msg');
         if (chatWs && chatWs.readyState === WebSocket.OPEN) {
-          chatWs.send(JSON.stringify({ type: 'chat', text, sender: playerName }));
+          chatWs.send(JSON.stringify({
+            type: 'chat',
+            text,
+            sender: playerName,
+            avatar: playerAvatar,
+            color: playerColor
+          }));
           playRetroBlip(600, 'square', 0.05);
-        } else {
+        } else if (chatInput) {
           chatInput.value = text;
           chatInput.focus();
         }
       };
     });
 
-    // Capture when user selects any file in the emulator and cache it in IndexedDB
+    // Capture manual file input in React emulator
     document.addEventListener('change', async (e) => {
       if (e.target && e.target.type === 'file' && e.target.files && e.target.files[0] && e.target.id !== 'input-import-sav-file') {
         const file = e.target.files[0];
@@ -815,23 +1503,12 @@
           const buffer = await file.arrayBuffer();
           await saveSessionRom(file.name, buffer);
           isGameInitialized = true;
-        } catch(err) {
-          console.warn('Could not save file to IndexedDB:', err);
-        }
+          connectDirectLinkCable(false);
+        } catch (err) {}
       }
     }, true);
 
-    // Auto-lowercase and sanitize input in React's "Room to join" field
-    document.addEventListener('input', (e) => {
-      if (e.target && e.target.placeholder === 'Room to join') {
-        const clean = e.target.value.toLowerCase().replace(/\s+/g, '');
-        if (e.target.value !== clean) {
-          e.target.value = clean;
-        }
-      }
-    });
-
-    // Load ROMs list into sidebar
+    // Load ROMs list into sidebar & wire Party Launch button
     fetch('/api/roms')
       .then(res => res.json())
       .then(roms => {
@@ -841,33 +1518,48 @@
             const opt = document.createElement('option');
             opt.value = rom;
             opt.textContent = rom;
+            if (currentRomName === rom) opt.selected = true;
             select.appendChild(opt);
           });
 
           select.onchange = async () => {
             const val = select.value;
             if (!val) return;
-            try {
-              const resp = await fetch(`/api/roms/${encodeURIComponent(val)}`);
-              const blob = await resp.blob();
-              const buffer = await blob.arrayBuffer();
-              await saveSessionRom(val, buffer);
-              feedRomToEmulator(buffer, val);
-              playRetroBlip(880, 'triangle', 0.12);
-            } catch(e) {
-              alert('Fehler beim Laden: ' + e.message);
+            await loadServerRomByName(val, true);
+            if (chatWs && chatWs.readyState === WebSocket.OPEN) {
+              chatWs.send(JSON.stringify({ type: 'SELECT_ROM', rom: val }));
             }
           };
         }
       })
       .catch(() => {});
+
+    const partyLaunchBtn = document.getElementById('btn-party-launch-rom');
+    if (partyLaunchBtn) {
+      partyLaunchBtn.onclick = async () => {
+        const select = document.getElementById('sidebar-rom-select');
+        const chosenRom = (select && select.value) || currentRomName;
+        if (!chosenRom) {
+          alert('Bitte wähle zuerst ein Spiel im Dropdown-Menü aus!');
+          return;
+        }
+        await loadServerRomByName(chosenRom, true);
+        if (partyState.isHost && chatWs && chatWs.readyState === WebSocket.OPEN) {
+          chatWs.send(JSON.stringify({
+            type: 'PARTY_LAUNCH_ROM',
+            rom: chosenRom,
+            initiatedBy: `${playerAvatar} ${playerName}`
+          }));
+        }
+      };
+    }
   }
 
-  // Periodic Observer to sync React state with retro UI & Auto-Restore
   let hasAttemptedRomAutoRestore = false;
+  let lastAnnouncedWorkletReady = false;
 
   async function syncLoop() {
-    // 1. Detect start egg button and show attractive overlay if not started yet
+    // 1. Detect start egg button and show overlay if not started yet
     const eggButton = document.querySelector('button[class*="startButton"]');
     let overlay = document.getElementById('start-game-overlay');
     if (eggButton && !overlay) {
@@ -880,11 +1572,10 @@
 
       overlay.innerHTML = `
         <div class="start-modal-card">
-          <div style="font-size: 24px; margin-bottom: 12px;">🎮</div>
-          <h2 style="font-family:'Press Start 2P', monospace; font-size:11px; color:#48c78e; margin:0 0 12px 0;">GAME BOY ONLINE</h2>
-          <p style="color:#94a3b8; font-size:14px; line-height:1.5;"></p>
-          ${hasCachedRom ? `<div style="background:rgba(72,199,142,0.15); border:1px solid #48c78e; border-radius:8px; padding:8px 12px; margin-top:14px; font-size:13px; color:#e2e8f0;">💾 Gespeichertes Spiel: <strong>${escapeHtml(cachedRom.name)}</strong> (wird wiederhergestellt)</div>` : ''}
-          <button class="start-arcade-btn" id="start-arcade-trigger">▶ START (AUDIO)</button>
+          <div style="font-size: 24px; margin-bottom: 8px;">🎮</div>
+          <h2 style="font-family:'Press Start 2P', monospace; font-size:11px; color:#48c78e; margin:0 0 8px 0;">GAME BOY PARTY</h2>
+          ${hasCachedRom ? `<div style="background:rgba(72,199,142,0.15); border:1px solid #48c78e; border-radius:8px; padding:6px 10px; margin-bottom:8px; font-size:11.5px; color:#e2e8f0;">💾 <strong>${escapeHtml(cachedRom.name)}</strong> bereit</div>` : ''}
+          <button class="start-arcade-btn" id="start-arcade-trigger" style="margin-top:8px; padding:12px 20px; font-size:11px;">▶ START (AUDIO)</button>
         </div>
       `;
       document.body.appendChild(overlay);
@@ -892,7 +1583,9 @@
       document.getElementById('start-arcade-trigger').onclick = () => {
         playRetroBlip(440, 'triangle', 0.1);
         setTimeout(() => playRetroBlip(880, 'triangle', 0.15), 100);
-        const cur=document.querySelector('button[class*="startButton"]');if(cur)cur.click();else eggButton.click();
+        const cur = document.querySelector('button[class*="startButton"]');
+        if (cur) cur.click();
+        else eggButton.click();
         overlay.style.opacity = '0';
         setTimeout(() => overlay.remove(), 250);
       };
@@ -900,81 +1593,48 @@
       overlay.remove();
     }
 
-    // 2. Auto-restore cached ROM after audio worklet has started
-    if (!eggButton && !hasAttemptedRomAutoRestore) {
-      const fileInput = document.querySelector('input[type="file"]');
-      if (fileInput) {
-        hasAttemptedRomAutoRestore = true;
-        const cached = await getSessionRom();
-        if (cached && cached.buffer) {
-          console.log('[AutoRestore] Restoring cached ROM:', cached.name);
-          feedRomToEmulator(cached.buffer, cached.name);
-          addChatMessage({
-            type: 'system',
-            text: `Spiel "${cached.name}" automatisch aus dem Cache wiederhergestellt!`,
-            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-          });
+    // 2. Auto-restore cached ROM & auto-connect Link-Cable once AudioWorklet is ready
+    if (!eggButton && window.__gbWorkletNode && window.__gbWorkletNode.port) {
+      if (!lastAnnouncedWorkletReady) {
+        lastAnnouncedWorkletReady = true;
+        connectDirectLinkCable(false);
+        sendPartyUpdate();
+        updateLinkCableUI();
+      }
+
+      if (!hasAttemptedRomAutoRestore) {
+        const fileInput = document.querySelector('input[type="file"]');
+        if (fileInput) {
+          hasAttemptedRomAutoRestore = true;
+          const cached = await getSessionRom();
+          if (cached && cached.buffer) {
+            feedRomToEmulator(cached.buffer, cached.name);
+            showToast(`💾 "${cached.name}" automatisch wiederhergestellt`);
+          }
         }
       }
     }
 
-    // 3. Detect Room Code from React UI
-    const allButtons = Array.from(document.querySelectorAll('button'));
-    const createdRoomBtn = allButtons.find(b => b.textContent && b.textContent.includes('🥚🐔'));
-    const connectedBtn = allButtons.find(b => (b.textContent && b.textContent.includes('Connected')) || (b.textContent && b.textContent.includes('🐣🐔')));
-
-    const roomDisplay = document.getElementById('active-room-display');
-    const topStatusDot = document.getElementById('top-status-dot');
-    const topStatusText = document.getElementById('top-status-text');
-
-    if (connectedBtn) {
-      if (topStatusDot) topStatusDot.className = 'status-dot connected';
-      if (topStatusText) topStatusText.textContent = 'Verbunden (Link-Kabel aktiv)';
-    } else if (createdRoomBtn) {
-      const code = createdRoomBtn.textContent.replace('🥚🐔', '').trim().toLowerCase();
-      if (code && code !== currentRoom) {
-        currentRoom = code;
-        if (roomDisplay) roomDisplay.textContent = code;
-        connectChat(code);
-      }
-      if (topStatusDot) topStatusDot.className = 'status-dot waiting';
-      if (topStatusText) topStatusText.textContent = `Warte auf Freund (${code})...`;
-    }
-
-    // 4. Auto-join if ?room=... is in URL
-    const urlParams = new URLSearchParams(window.location.search);
-    const joinRoom = urlParams.get('room');
-    if (joinRoom) {
-      const cleanJoin = joinRoom.trim().toLowerCase();
-      if (cleanJoin !== currentRoom) {
-        currentRoom = cleanJoin;
-        if (roomDisplay) roomDisplay.textContent = cleanJoin;
-        connectChat(cleanJoin);
-        
-        const input = document.querySelector('input[placeholder="Room to join"]');
-        if (input && input.value !== cleanJoin) {
-          input.value = cleanJoin;
-          input.dispatchEvent(new Event('input', { bubbles: true }));
-          setTimeout(() => {
-            const joinBtn = Array.from(document.querySelectorAll('button')).find(b => b.textContent && b.textContent.includes('Join room'));
-            if (joinBtn) joinBtn.click();
-          }, 150);
-        }
-      }
-    }
-
-    // Refresh savegame list periodically in case of new in-game save
-    refreshSaveManagerList();
+    updateLinkCableUI();
   }
 
-  // Start initialization
+  // Heartbeat every 10s for Party presence
+  setInterval(() => {
+    if (chatWs && chatWs.readyState === WebSocket.OPEN) {
+      chatWs.send(JSON.stringify({ type: 'HEARTBEAT', playerId }));
+    }
+    if (linkWs && linkWs.readyState === WebSocket.OPEN) {
+      linkWs.send(JSON.stringify({ type: 'PING' }));
+    }
+  }, 10000);
+
   window.addEventListener('DOMContentLoaded', () => {
     initLayout();
-    setInterval(syncLoop, 500);
+    setInterval(syncLoop, 600);
   });
 
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
     initLayout();
-    setInterval(syncLoop, 500);
+    setInterval(syncLoop, 600);
   }
 })();

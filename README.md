@@ -8,14 +8,18 @@ Perfekt geeignet, um im Browser gegeneinander **Tetris** zu spielen oder in **Po
 
 ## ✨ Features
 
-- **🔗 Echtes Link-Kabel über WebSockets:** Basiert auf dem hochpräzisen Rust/WebAssembly-Kern von [gebeh](https://github.com/itytophile/gebeh) mit Rollback-Synchronisation für flüssiges Serial-Link-Netplay.
-- **🔑 Einfache 4-stellige Freundescodes:**
-  - Automatisch generierte 4-stellige Codes (nur Kleinbuchstaben & Zahlen, **ohne `o`**, um Verwechslungen mit `0` auszuschließen).
-  - Einladungslinks (`https://deine-domain.de/?room=abcd`) zum direkten Beitreten per Klick.
+- **🎉 Party-Hub Matchmaking (inspiriert von [NobleBrains/treffen](https://github.com/NobleBrains/treffen)):**
+  - **Sofortiger Raum beim Öffnen (`?room=xxxx`):** Kein manuelles Erstellen nötig – jeder Besuch erhält sofort einen 4-stelligen Raumcode (Kleinbuchstaben & Zahlen **ohne `o`**) direkt in der URL.
+  - **Header Room-Pill & QR-Code:** Einladungslink mit 1 Klick kopieren (`📋`), per **QR-Code (`📱`)** scannen, Raum wechseln (`✏️`) oder zufälligen Raum würfeln (`🎲`).
+  - **Party-Couch & Spieler-Karten (`ROSTER_SYNC`):** Live-Übersicht aller Spieler im Raum mit wählbarem Avatar (18 Retro-Avatare), Farb-Rahmen, Bereit-Status, aktuell gespieltem Spiel und **Host-Krone (`👑`)** inkl. Host-Übergabe.
+  - **🚀 Synchroner Party-ROM-Start:** Der Party-Host kann eine Server-ROM auswählen und mit **`🚀 Für Party starten`** zeitgleich auf den Bildschirmen aller Mitspieler im Raum booten.
+- **🔗 Vollautomatisches Link-Kabel (`Auto-Link-Cable`):**
+  - Sobald zwei Spieler im selben Party-Raum ein Spiel gestartet haben, verbindet sich das virtuelle Game Boy Serial-Link-Kabel **automatisch im Hintergrund** (`/ws?room=xxxx&direct=1`) – ganz ohne Untermenüs.
+  - **Auto-Reconnect:** Lädt ein Spieler die Seite neu, wird das Link-Kabel nahtlos neu gekoppelt.
 - **🕹️ Authentisches Retro Game Boy DMG Design:**
   - Detailliertes Game Boy Gehäuse mit Power-LED, interaktivem D-Pad, A/B-Buttons und 8-Bit Web-Audio-Soundeffekten.
 - **💬 Integrierter Echtzeit-Chat:**
-  - Eigener WebSocket-Chat (`/chat`) pro Raum inkl. Chat-Historie, Spielername und Schnell-Reaktionen (*„🎮 Bereit!“*, *„🔄 Lass tauschen!“*, *„⚔️ Kampf!“*, *„🎉 GG!“*).
+  - Eigener WebSocket-Chat (`/chat`) pro Raum inkl. Chat-Historie, Spielername, Avatar und Schnell-Reaktionen (*„🎮 Bereit!“*, *„🔄 Lass tauschen!“*, *„⚔️ Kampf!“*, *„🎉 GG!“*).
 - **🛡️ Session- & Reload-Schutz (Persistence Engine):**
   - Schutz vor versehentlichem Neuladen (`beforeunload`).
   - Automatisches Caching der aktiven ROM in `IndexedDB` (`gb_session_persistence`), sodass nach einem Reload sofort weitergespielt werden kann.
