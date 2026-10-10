@@ -851,7 +851,7 @@
             <div class="retro-card-title" style="margin-bottom:0;">
               <span>🛋️</span> Party-Couch <span class="couch-badge" id="party-count-badge">1 Spieler online</span>
             </div>
-            <div style="display:flex; gap:6px;">
+            <div style="display:flex; gap:6px; flex-wrap:wrap;">
               <button class="retro-btn" id="btn-copy-invite" style="padding:5px 10px; font-size:11.5px;">📋 Einladen</button>
               <button class="retro-btn retro-btn-secondary" id="btn-open-room-modal" style="padding:5px 10px; font-size:11.5px;">🔑 Code eingeben</button>
               <button class="retro-btn retro-btn-secondary" id="btn-open-settings" style="padding:5px 9px; font-size:11.5px;" title="Erweiterte Emulator-Einstellungen">⚙️</button>
