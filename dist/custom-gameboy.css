@@ -241,20 +241,6 @@ div[class*="_screen_"]::before {
   padding-bottom: 3px;
 }
 
-/* Battery LED */
-div[class*="_screen_"]::after {
-  content: "• BATTERY";
-  position: absolute;
-  top: 48px;
-  left: 5px;
-  font-family: 'Inter', sans-serif;
-  font-size: 7.5px;
-  font-weight: 800;
-  color: #ff2222;
-  text-shadow: 0 0 10px #ff2222;
-  letter-spacing: 0.5px;
-}
-
 /* LCD Canvas inside Screen */
 div[class*="_screen_"] canvas {
   background: #8ba340 !important;
