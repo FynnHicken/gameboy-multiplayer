@@ -676,52 +676,275 @@ section.section .message-body {
 }
 
 /* =========================================================
-   START OVERLAY (Egg replacement)
+   STANDBY GAME BOY SHELL (Shown in left column before power-on)
    ========================================================= */
 
-.start-overlay {
-  position: fixed;
-  right: 20px; bottom: 20px; left: auto; top: auto;
-  background: transparent;
-  backdrop-filter: none;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-  gap: 20px;
-  text-align: center;
-  padding: 20px;
+.console-column {
+  min-width: 320px;
 }
 
-.start-modal-card {
-  background: #1a1f2b;
-  border: 2px solid var(--accent-green);
-  border-radius: 20px;
-  padding: 12px 16px;
-  max-width: 250px;
-  box-shadow: 0 0 50px rgba(72, 199, 142, 0.25);
+.standby-gb-shell {
+  background: var(--gb-chassis);
+  border-radius: 20px 20px 65px 20px;
+  box-shadow:
+    inset 3px 3px 6px var(--gb-chassis-light),
+    inset -4px -4px 8px var(--gb-chassis-shadow),
+    0 22px 55px rgba(0, 0, 0, 0.7),
+    0 4px 12px rgba(0, 0, 0, 0.5);
+  padding: 30px 24px 38px 24px;
+  max-width: 390px;
+  width: 390px;
+  position: relative;
+  border: 1px solid #b8b4a7;
+  user-select: none;
+  cursor: pointer;
+}
+
+@media (max-width: 440px) {
+  .console-column {
+    min-width: 0;
+    width: 100%;
+  }
+  .standby-gb-shell {
+    width: 100%;
+    padding: 24px 16px 32px 16px;
+  }
+}
+
+.standby-gb-shell::before {
+  content: "";
+  position: absolute;
+  top: 10px;
+  left: 32px;
+  right: 32px;
+  height: 3px;
+  background: var(--gb-chassis-shadow);
+  box-shadow: 0 5px 0 var(--gb-chassis-shadow);
+  border-radius: 2px;
+}
+
+.standby-gb-shell::after {
+  content: "";
+  position: absolute;
+  bottom: 24px;
+  right: 24px;
+  width: 50px;
+  height: 28px;
+  background: repeating-linear-gradient(
+    -30deg,
+    #413e37 0px,
+    #413e37 3px,
+    transparent 3px,
+    transparent 8px
+  );
+  border-radius: 4px;
+  opacity: 0.85;
+}
+
+.standby-gb-bezel {
+  background: var(--gb-screen-bezel);
+  border-radius: 12px 12px 35px 12px;
+  padding: 24px 20px 18px 20px;
+  box-shadow:
+    inset 0 3px 8px rgba(0, 0, 0, 0.65),
+    inset 0 -2px 4px rgba(255, 255, 255, 0.15),
+    0 2px 5px rgba(0,0,0,0.3);
+  position: relative;
+  margin-top: 8px;
+  margin-bottom: 14px;
+}
+
+.standby-gb-bezel::before {
+  content: "DOT MATRIX WITH STEREO SOUND";
+  display: block;
+  font-family: 'Inter', sans-serif;
+  font-size: 8px;
+  font-weight: 800;
+  color: #a4abb8;
+  text-align: right;
+  letter-spacing: 0.6px;
+  margin-bottom: 6px;
+  border-top: 2px solid #1b264f;
+  border-bottom: 2px solid #861657;
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+
+.standby-gb-lcd {
+  background: #8ba340;
+  border-radius: 4px;
+  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.75);
+  width: 100%;
+  max-width: 295px;
+  min-height: 255px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: space-between;
+  padding: 12px;
+  text-align: center;
+  color: #0f380f;
+  cursor: default;
+}
+
+.standby-gb-title {
+  font-family: 'Press Start 2P', monospace;
+  font-size: 10.5px;
+  color: #0f380f;
+  margin-bottom: 8px;
+  line-height: 1.35;
+  letter-spacing: 0.5px;
+}
+
+.standby-field-label {
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  color: #1e4611;
+  text-align: left;
+  margin-bottom: 3px;
+  display: block;
+}
+
+.standby-name-input {
+  width: 100%;
+  background: rgba(155, 188, 15, 0.55);
+  border: 2px solid #0f380f;
+  border-radius: 6px;
+  padding: 6px 9px;
+  font-size: 13px;
+  font-weight: 800;
+  color: #0f380f;
+  outline: none;
+  margin-bottom: 8px;
+  font-family: 'Inter', sans-serif;
+}
+
+.standby-name-input::placeholder {
+  color: rgba(15, 56, 15, 0.5);
+}
+
+.standby-name-input:focus {
+  background: #9bbc0f;
+  box-shadow: 0 0 0 2px rgba(15, 56, 15, 0.25);
+}
+
+.standby-char-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 5px;
+  width: 100%;
+  margin-bottom: 9px;
+}
+
+.standby-char-btn {
+  height: 32px;
+  border-radius: 6px;
+  border: 1.5px solid rgba(15, 56, 15, 0.35);
+  background: rgba(15, 56, 15, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  cursor: pointer;
+  transition: all 0.12s;
+  padding: 0;
+}
+
+.standby-char-btn:hover {
+  background: rgba(15, 56, 15, 0.2);
+  transform: scale(1.06);
+}
+
+.standby-char-btn.selected {
+  background: #0f380f;
+  border-color: #0f380f;
+  box-shadow: 0 2px 0 #072207;
+  transform: scale(1.06);
+}
+
+.standby-gb-sub {
+  font-size: 11px;
+  font-weight: 800;
+  color: #1e4611;
+  background: rgba(15, 56, 15, 0.12);
+  border: 1.5px solid rgba(15, 56, 15, 0.35);
+  border-radius: 6px;
+  padding: 4px 8px;
+  margin-bottom: 8px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .start-arcade-btn {
-  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-  color: white;
-  border: none;
-  border-radius: 12px;
-  padding: 16px 32px;
+  width: 100%;
+  background: #0f380f;
+  color: #9bbc0f;
+  border: 2px solid #0f380f;
+  border-radius: 8px;
+  padding: 10px 12px;
   font-family: 'Press Start 2P', monospace;
-  font-size: 13px;
+  font-size: 10px;
   cursor: pointer;
-  letter-spacing: 1px;
-  box-shadow: 0 8px 24px rgba(16, 185, 129, 0.4);
-  transition: all 0.2s;
-  margin-top: 22px;
+  letter-spacing: 0.6px;
+  box-shadow: 0 4px 0 #072207;
+  transition: all 0.15s;
 }
 
 .start-arcade-btn:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 12px 30px rgba(16, 185, 129, 0.6);
+  transform: translateY(-1px);
+  background: #174917;
 }
+
+.standby-controls-mock {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 12px 24px 12px;
+  opacity: 0.85;
+}
+
+.standby-dpad {
+  width: 90px;
+  height: 90px;
+  position: relative;
+}
+
+.standby-dpad::before,
+.standby-dpad::after {
+  content: "";
+  position: absolute;
+  background: #222;
+  border-radius: 4px;
+  box-shadow: inset 0 2px 3px rgba(255,255,255,0.15), 0 3px 5px rgba(0,0,0,0.4);
+}
+
+.standby-dpad::before {
+  top: 30px; left: 0; width: 90px; height: 30px;
+}
+
+.standby-dpad::after {
+  top: 0; left: 30px; width: 30px; height: 90px;
+}
+
+.standby-ab {
+  display: flex;
+  gap: 16px;
+  transform: rotate(-25deg);
+}
+
+.standby-ab span {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: var(--gb-btn-ab);
+  box-shadow: inset 0 2px 4px rgba(255,255,255,0.25), 0 4px 6px rgba(0,0,0,0.5);
+  display: inline-block;
+}
+
 
 /* =========================================================
    TREFFEN-INSPIRED PARTY-HUB & MATCHMAKING UI

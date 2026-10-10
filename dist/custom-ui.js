@@ -774,7 +774,7 @@
       const blob = await resp.blob();
       const buffer = await blob.arrayBuffer();
       await saveSessionRom(romName, buffer);
-      feedRomToEmulator(buffer, romName);
+      await feedRomToEmulator(buffer, romName);
       playRetroBlip(880, 'triangle', 0.12);
       if (showNotification) {
         showToast(`🎮 "${romName}" geladen!`);
@@ -1208,19 +1208,83 @@
     return p.innerHTML;
   }
 
-  function feedRomToEmulator(arrayBuffer, fileName) {
-    const file = new File([arrayBuffer], fileName, { type: 'application/octet-stream' });
-    const fileInput = document.querySelector('input[type="file"]');
+  function getEmulatorFileInput() {
+    return document.querySelector('#root input[type="file"]');
+  }
+
+  let standbySelectedAvatar = playerAvatar;
+
+  function applyStandbyProfileIfPresent() {
+    const standbyNameEl = document.getElementById('standby-name-input');
+    if (standbyNameEl) {
+      const val = standbyNameEl.value.trim();
+      if (val) {
+        playerName = val.slice(0, 18);
+        localStorage.setItem('gb_player_name', playerName);
+      }
+    }
+    if (standbySelectedAvatar) {
+      playerAvatar = standbySelectedAvatar;
+      const foundPreset = AVATAR_POOL.find(p => p.avatar === playerAvatar);
+      if (foundPreset) playerColor = foundPreset.color;
+      localStorage.setItem('gb_player_avatar', playerAvatar);
+      localStorage.setItem('gb_player_color', playerColor);
+    }
+    updateHeaderProfileUI();
+    sendPartyUpdate();
+  }
+
+  function showGameBoyScreen() {
+    const gbShell = document.querySelector('#root div[class*="_content_"]');
+    if (gbShell && gbShell.style.display === 'none') {
+      const closeBtn = Array.from(document.querySelectorAll('#root button')).find(
+        b => b.textContent && b.textContent.includes('Close settings')
+      );
+      if (closeBtn) closeBtn.click();
+    }
+  }
+
+  async function ensureEmulatorStarted() {
+    applyStandbyProfileIfPresent();
+    if (getEmulatorFileInput()) return true;
+
+    const eggBtn = document.querySelector('#root button[class*="startButton"]') || document.querySelector('button[class*="startButton"]');
+    if (eggBtn) {
+      eggBtn.click();
+    }
+
+    for (let i = 0; i < 100; i++) {
+      const inp = getEmulatorFileInput();
+      if (inp) {
+        const standby = document.getElementById('start-game-overlay');
+        if (standby) standby.remove();
+        return true;
+      }
+      await new Promise(r => setTimeout(r, 45));
+    }
+    return !!getEmulatorFileInput();
+  }
+
+  async function feedRomToEmulator(arrayBuffer, fileName) {
+    await ensureEmulatorStarted();
+    const fileInput = getEmulatorFileInput();
     if (fileInput) {
+      const file = new File([arrayBuffer], fileName, { type: 'application/octet-stream' });
       const dt = new DataTransfer();
       dt.items.add(file);
       fileInput.files = dt.files;
       fileInput.dispatchEvent(new Event('change', { bubbles: true }));
       isGameInitialized = true;
+      hasAttemptedRomAutoRestore = true;
+
+      const standby = document.getElementById('start-game-overlay');
+      if (standby) standby.remove();
+
       setTimeout(() => {
+        showGameBoyScreen();
         connectDirectLinkCable(false);
         sendPartyUpdate();
-      }, 300);
+      }, 250);
       return true;
     }
     return false;
@@ -1495,9 +1559,9 @@
       };
     });
 
-    // Capture manual file input in React emulator
+    // Capture manual file input in React emulator (strictly inside #root)
     document.addEventListener('change', async (e) => {
-      if (e.target && e.target.type === 'file' && e.target.files && e.target.files[0] && e.target.id !== 'input-import-sav-file') {
+      if (e.target && e.target.type === 'file' && e.target.files && e.target.files[0] && e.target.closest('#root')) {
         const file = e.target.files[0];
         try {
           const buffer = await file.arrayBuffer();
@@ -1514,13 +1578,20 @@
       .then(roms => {
         const select = document.getElementById('sidebar-rom-select');
         if (select && Array.isArray(roms)) {
-          roms.forEach(rom => {
+          roms.forEach((rom, idx) => {
             const opt = document.createElement('option');
             opt.value = rom;
             opt.textContent = rom;
-            if (currentRomName === rom) opt.selected = true;
+            if (currentRomName === rom || (!currentRomName && idx === 0)) {
+              opt.selected = true;
+            }
             select.appendChild(opt);
           });
+
+          const standbyBadge = document.getElementById('standby-rom-badge');
+          if (standbyBadge && !currentRomName && roms.length > 0) {
+            standbyBadge.innerHTML = `🎮 Bereit: <strong>${escapeHtml(roms[0])}</strong>`;
+          }
 
           select.onchange = async () => {
             const val = select.value;
@@ -1557,43 +1628,130 @@
 
   let hasAttemptedRomAutoRestore = false;
   let lastAnnouncedWorkletReady = false;
+  let isCreatingStandbyOverlay = false;
+
+  const STANDBY_CHARS = ['🐶', '🦊', '🐱', '🐼', '🐸', '🦁', '🐧', '🦄', '🐻', '👾', '⚡', '🔥'];
 
   async function syncLoop() {
-    // 1. Detect start egg button and show overlay if not started yet
-    const eggButton = document.querySelector('button[class*="startButton"]');
+    const eggButton = document.querySelector('#root button[class*="startButton"]') || document.querySelector('button[class*="startButton"]');
+    const emuFileInput = getEmulatorFileInput();
     let overlay = document.getElementById('start-game-overlay');
-    if (eggButton && !overlay) {
-      overlay = document.createElement('div');
-      overlay.id = 'start-game-overlay';
-      overlay.className = 'start-overlay';
 
-      const cachedRom = await getSessionRom();
-      const hasCachedRom = !!cachedRom;
+    // 1. Render authentic Standby Game Boy DMG Shell with Character & Name Selection inside #left-console-col
+    if (eggButton && !overlay && !isCreatingStandbyOverlay) {
+      const leftCol = document.getElementById('left-console-col');
+      if (leftCol) {
+        isCreatingStandbyOverlay = true;
+        const cachedRom = await getSessionRom();
+        const selectEl = document.getElementById('sidebar-rom-select');
+        const readyRomName = (cachedRom && cachedRom.name) || currentRomName || (selectEl && selectEl.value) || null;
 
-      overlay.innerHTML = `
-        <div class="start-modal-card">
-          <div style="font-size: 24px; margin-bottom: 8px;">🎮</div>
-          <h2 style="font-family:'Press Start 2P', monospace; font-size:11px; color:#48c78e; margin:0 0 8px 0;">GAME BOY PARTY</h2>
-          ${hasCachedRom ? `<div style="background:rgba(72,199,142,0.15); border:1px solid #48c78e; border-radius:8px; padding:6px 10px; margin-bottom:8px; font-size:11.5px; color:#e2e8f0;">💾 <strong>${escapeHtml(cachedRom.name)}</strong> bereit</div>` : ''}
-          <button class="start-arcade-btn" id="start-arcade-trigger" style="margin-top:8px; padding:12px 20px; font-size:11px;">▶ START (AUDIO)</button>
-        </div>
-      `;
-      document.body.appendChild(overlay);
+        if (!document.getElementById('start-game-overlay')) {
+          overlay = document.createElement('div');
+          overlay.id = 'start-game-overlay';
+          overlay.className = 'standby-gb-shell';
 
-      document.getElementById('start-arcade-trigger').onclick = () => {
-        playRetroBlip(440, 'triangle', 0.1);
-        setTimeout(() => playRetroBlip(880, 'triangle', 0.15), 100);
-        const cur = document.querySelector('button[class*="startButton"]');
-        if (cur) cur.click();
-        else eggButton.click();
-        overlay.style.opacity = '0';
-        setTimeout(() => overlay.remove(), 250);
-      };
-    } else if (!eggButton && overlay) {
+          standbySelectedAvatar = playerAvatar;
+          const charButtonsHtml = STANDBY_CHARS.map(emoji => `
+            <button type="button" class="standby-char-btn ${emoji === standbySelectedAvatar ? 'selected' : ''}" data-char="${emoji}" title="Charakter ${emoji} wählen">${emoji}</button>
+          `).join('');
+
+          overlay.innerHTML = `
+            <div class="standby-gb-bezel">
+              <div class="standby-gb-lcd">
+                <div class="standby-gb-title">👾 SPIELER & START</div>
+
+                <div>
+                  <label class="standby-field-label" for="standby-name-input">Dein Spielername:</label>
+                  <input type="text" class="standby-name-input" id="standby-name-input" maxlength="18" value="${escapeHtml(playerName)}" placeholder="Name eingeben...">
+
+                  <span class="standby-field-label">Wähle deinen Charakter:</span>
+                  <div class="standby-char-grid" id="standby-char-grid">
+                    ${charButtonsHtml}
+                  </div>
+                </div>
+
+                <div>
+                  <div class="standby-gb-sub" id="standby-rom-badge">
+                    ${readyRomName ? `💾 Bereit: <strong>${escapeHtml(readyRomName)}</strong>` : '🎮 Wähle ein Spiel & starte'}
+                  </div>
+                  <button type="button" class="start-arcade-btn" id="start-arcade-trigger">▶ START GAME BOY</button>
+                </div>
+              </div>
+            </div>
+            <div class="standby-controls-mock">
+              <div class="standby-dpad"></div>
+              <div class="standby-ab"><span></span><span></span></div>
+            </div>
+          `;
+
+          leftCol.prepend(overlay);
+
+          // Wire character selection buttons inside the Game Boy LCD
+          overlay.querySelectorAll('.standby-char-btn').forEach(btn => {
+            btn.onclick = (e) => {
+              e.stopPropagation();
+              overlay.querySelectorAll('.standby-char-btn').forEach(b => b.classList.remove('selected'));
+              btn.classList.add('selected');
+              standbySelectedAvatar = btn.getAttribute('data-char');
+              playRetroBlip(620, 'square', 0.05);
+              applyStandbyProfileIfPresent();
+            };
+          });
+
+          const nameInp = document.getElementById('standby-name-input');
+          if (nameInp) {
+            nameInp.onclick = (e) => e.stopPropagation();
+            nameInp.oninput = () => applyStandbyProfileIfPresent();
+            nameInp.onkeydown = (e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                document.getElementById('start-arcade-trigger')?.click();
+              }
+            };
+          }
+
+          const triggerStart = async (e) => {
+            if (e) e.stopPropagation();
+            const btn = document.getElementById('start-arcade-trigger');
+            if (btn) {
+              btn.disabled = true;
+              btn.textContent = '⏳ STARTE...';
+            }
+            playRetroBlip(440, 'triangle', 0.09);
+            setTimeout(() => playRetroBlip(880, 'triangle', 0.14), 90);
+
+            await ensureEmulatorStarted();
+
+            const cached = await getSessionRom();
+            if (cached && cached.buffer) {
+              hasAttemptedRomAutoRestore = true;
+              await feedRomToEmulator(cached.buffer, cached.name);
+              showToast(`🎮 Willkommen ${playerAvatar} ${playerName}! (${cached.name})`);
+            } else {
+              const sel = document.getElementById('sidebar-rom-select');
+              const fallbackRom = (sel && sel.value) || currentRomName;
+              if (fallbackRom) {
+                hasAttemptedRomAutoRestore = true;
+                await loadServerRomByName(fallbackRom, false);
+                showToast(`🎮 Willkommen ${playerAvatar} ${playerName}! (${fallbackRom})`);
+              } else {
+                showGameBoyScreen();
+                showToast(`🎮 Willkommen ${playerAvatar} ${playerName}!`);
+              }
+            }
+          };
+
+          const startBtn = document.getElementById('start-arcade-trigger');
+          if (startBtn) startBtn.onclick = triggerStart;
+        }
+        isCreatingStandbyOverlay = false;
+      }
+    } else if (!eggButton && emuFileInput && overlay) {
       overlay.remove();
     }
 
-    // 2. Auto-restore cached ROM & auto-connect Link-Cable once AudioWorklet is ready
+    // 2. Auto-restore cached ROM & auto-connect Link-Cable once AudioWorklet + #root input[type="file"] are ready
     if (!eggButton && window.__gbWorkletNode && window.__gbWorkletNode.port) {
       if (!lastAnnouncedWorkletReady) {
         lastAnnouncedWorkletReady = true;
@@ -1602,14 +1760,18 @@
         updateLinkCableUI();
       }
 
-      if (!hasAttemptedRomAutoRestore) {
-        const fileInput = document.querySelector('input[type="file"]');
-        if (fileInput) {
-          hasAttemptedRomAutoRestore = true;
-          const cached = await getSessionRom();
-          if (cached && cached.buffer) {
-            feedRomToEmulator(cached.buffer, cached.name);
-            showToast(`💾 "${cached.name}" automatisch wiederhergestellt`);
+      if (!hasAttemptedRomAutoRestore && emuFileInput) {
+        hasAttemptedRomAutoRestore = true;
+        const cached = await getSessionRom();
+        if (cached && cached.buffer) {
+          await feedRomToEmulator(cached.buffer, cached.name);
+          showToast(`💾 "${cached.name}" automatisch wiederhergestellt`);
+        } else {
+          const sel = document.getElementById('sidebar-rom-select');
+          if (sel && sel.value) {
+            await loadServerRomByName(sel.value, false);
+          } else {
+            showGameBoyScreen();
           }
         }
       }
@@ -1630,11 +1792,13 @@
 
   window.addEventListener('DOMContentLoaded', () => {
     initLayout();
-    setInterval(syncLoop, 600);
+    syncLoop();
+    setInterval(syncLoop, 500);
   });
 
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
     initLayout();
-    setInterval(syncLoop, 600);
+    syncLoop();
+    setInterval(syncLoop, 500);
   }
 })();
