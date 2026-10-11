@@ -7,5 +7,5 @@ Lege in diesen Ordner deine Game Boy (`.gb`) und Game Boy Color (`.gbc`) ROM-Dat
 - `pokemon_rot.gb` – Pokémon Rote Edition (Tauschen & Kämpfen im Pokémon-Center)
 - `pokemon_gold.gbc` – Pokémon Goldene Edition (Gen 2 Link-Kabel & Zeitkapsel)
 
-### Enthaltener Test-Spielstand:
-- `pokemon_rot.sav` – Ein fertig vorbereiteter, **100 % PKHeX-validierter** 32-KB-Battery-Save (Trainer: `ROT`, Starter: Glumanda), der über den Button **`⭐ PKHeX Teststand`** in der Web-Oberfläche direkt geladen werden kann.
+### Enthaltener Starter-Spielstand:
+- `pokemon_rot.sav` – Ein fertig vorbereiteter, verifizierter 32-KB-Battery-Save (Trainer: `ROT`, Starter: Glumanda), der über den Button **`⭐ Starter-Spielstand`** in der Web-Oberfläche direkt geladen werden kann.

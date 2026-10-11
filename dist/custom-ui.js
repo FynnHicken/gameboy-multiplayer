@@ -1,6 +1,6 @@
 /**
  * Game Boy Online Multiplayer - Retro UI, Treffen-inspired Party-Hub,
- * Auto Link-Cable, Live Chat, Persistence & PKHeX Save Engine
+ * Auto Link-Cable, Live Chat, Persistence & Battery Save Engine
  */
 
 (function() {
@@ -174,7 +174,7 @@
     } catch (e) {}
   }
 
-  // --- .sav Battery Save Management & PKHeX Validation Engine ---
+  // --- .sav Battery Save Management & Checksum Validation Engine ---
   function openGebehDb() {
     return new Promise((resolve) => {
       const req = indexedDB.open('gebeh', 2);
@@ -254,7 +254,7 @@
         partyCount: g1PartyCount,
         badges,
         chkOk,
-        pkhexReady: chkOk,
+        checksumReady: chkOk,
         size: bytes.length,
         summary: `Trainer: ${trainer.trim() || 'ROT'} | ${g1PartyCount} Pokémon | ${badges} Orden`
       };
@@ -282,7 +282,7 @@
         title: 'POKEMON_GLDAAUD',
         trainer: trainer.trim() || 'GOLD',
         partyCount: g2PartyCount,
-        pkhexReady: true,
+        checksumReady: true,
         size: bytes.length,
         summary: `Trainer: ${trainer.trim() || 'GOLD'} | ${g2PartyCount} Pokémon`
       };
@@ -291,7 +291,7 @@
     return {
       valid: true,
       size: bytes.length,
-      pkhexReady: false,
+      checksumReady: false,
       summary: `Standard Game Boy Spielstand (${bytes.length} Bytes)`
     };
   }
@@ -344,8 +344,8 @@
         if (info.isEmpty) {
           const proceed = confirm(
             `⚠️ ACHTUNG: Der Spielstand für "${title}" ist noch ungespeichert (32 KB leere Nullen)!\n\n` +
-            `PKHeX wird diese Datei als ungültig ablehnen, weil im Spiel noch kein Spielstand angelegt wurde.\n\n` +
-            `👉 So machst du ihn PKHeX-tauglich:\n` +
+            `Diese Datei enthält noch keinen aktiven Spielstand, weil im Spiel noch nicht gespeichert wurde.\n\n` +
+            `👉 So sicherst du deinen Spielstand richtig:\n` +
             `1. Drücke im Spiel START [Taste Enter]\n` +
             `2. Gehe auf "SICHERN" und bestätige mit JA [Taste A]\n` +
             `3. Klicke im Menü auf "🔄 Emulator sichern (Sync)"\n` +
@@ -367,8 +367,8 @@
         URL.revokeObjectURL(url);
         playRetroBlip(750, 'triangle', 0.1);
 
-        if (info.pkhexReady) {
-          showToast(`✅ "${cleanName}" exportiert (PKHeX-bereit)`);
+        if (info.checksumReady) {
+          showToast(`✅ "${cleanName}" exportiert (32 KB SRAM)`);
         }
       };
     } catch (e) {
@@ -393,7 +393,7 @@
       const tx = db.transaction('saves', 'readwrite');
       tx.objectStore('saves').put(buffer, title);
       tx.oncomplete = () => {
-        alert(`Spielstand für "${title}" erfolgreich importiert!\n\n${info.summary || (buffer.length + ' Bytes')}\nPKHeX-Status: ${info.pkhexReady ? '100% Gültig ✅' : 'OK'}\n\nStarte das Spiel neu (oder wähle die ROM im Menü), um ihn zu spielen.`);
+        alert(`Spielstand für "${title}" erfolgreich importiert!\n\n${info.summary || (buffer.length + ' Bytes')}\nStatus: ${info.checksumReady ? 'Verifiziert ✅' : 'OK'}\n\nStarte das Spiel neu (oder wähle die ROM im Menü), um ihn zu spielen.`);
         playRetroBlip(880, 'square', 0.12);
         refreshSaveManagerList();
       };
@@ -427,7 +427,7 @@
         if (raw) info = inspectSaveBytes(raw instanceof Uint8Array ? raw : new Uint8Array(raw));
       } catch (e) {}
 
-      const isReady = info && info.pkhexReady;
+      const isReady = info && info.checksumReady;
       const isEmpty = info && info.isEmpty;
 
       itemsHtml += `
@@ -435,7 +435,7 @@
           <div style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
             <div style="display:flex; align-items:center; gap:6px;">
               <span style="font-size:12.5px; font-weight:700; color:#cbd5e1;">🎮 ${escapeHtml(title)}</span>
-              ${isReady ? '<span style="font-size:10px; background:#166534; color:#bbf7d0; padding:1px 5px; border-radius:3px; font-weight:700;">PKHeX ✅</span>' : ''}
+              ${isReady ? '<span style="font-size:10px; background:#166534; color:#bbf7d0; padding:1px 5px; border-radius:3px; font-weight:700;">Verifiziert ✅</span>' : ''}
               ${isEmpty ? '<span style="font-size:10px; background:#854d0e; color:#fef08a; padding:1px 5px; border-radius:3px; font-weight:700;">Leer (0 KB) ⚠️</span>' : ''}
             </div>
             <button class="retro-btn" style="padding:4px 9px; font-size:11px; ${isReady ? 'background:#16a34a;' : ''}" onclick="window.gbExportSave('${escapeHtml(title)}')">⬇️ .sav (32 KB)</button>
@@ -884,11 +884,11 @@
         <div class="retro-card">
           <details id="admin-save-panel">
             <summary class="retro-card-title" style="cursor:pointer; list-style:none; margin-bottom:0;">
-              <span>💾</span> Spielstand (.sav) & PKHeX Manager ▾
+              <span>💾</span> Spielstand (.sav) Manager ▾
             </summary>
             <div style="padding-top:12px;">
               <div style="font-size:12px; color:#94a3b8; margin-bottom:10px; line-height:1.4;">
-                Erzeugt echte <strong>32 KB Battery-SRAM .sav</strong> Dateien für PKHeX & externe Emulatoren. (Immer erst im Spiel <em>START &rarr; SICHERN</em> ausführen!)
+                Exportiert und importiert echte <strong>32 KB Battery-SRAM .sav</strong> Spielstände. (Immer erst im Spiel <em>START &rarr; SICHERN</em> ausführen!)
               </div>
               <div id="save-manager-content" style="margin-bottom:12px;"></div>
               <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
@@ -899,8 +899,8 @@
                   ⬆️ .sav importieren
                   <input type="file" id="input-import-sav-file" accept=".sav,.bin" style="display:none;">
                 </label>
-                <button id="btn-load-demo-save" class="retro-btn retro-btn-secondary" style="font-size:11px; padding:6px 9px; border-color:#eab308; color:#fde047;" title="Lädt einen vorgefertigten Pokémon Rot Spielstand zum Testen in PKHeX">
-                  ⭐ PKHeX Teststand
+                <button id="btn-load-demo-save" class="retro-btn retro-btn-secondary" style="font-size:11px; padding:6px 9px; border-color:#eab308; color:#fde047;" title="Lädt einen vorgefertigten Pokémon Rot Starter-Spielstand">
+                  ⭐ Starter-Spielstand
                 </button>
               </div>
             </div>
@@ -1441,20 +1441,20 @@
       };
     }
 
-    // Load pre-tested PKHeX demo save
+    // Load pre-configured starter save
     const demoBtn = document.getElementById('btn-load-demo-save');
     if (demoBtn) {
       demoBtn.onclick = async () => {
         try {
           const resp = await fetch('/api/roms/pokemon_rot.sav');
-          if (!resp.ok) throw new Error('Teststand konnte nicht geladen werden');
+          if (!resp.ok) throw new Error('Starter-Spielstand konnte nicht geladen werden');
           const buf = new Uint8Array(await resp.arrayBuffer());
           const db = await openGebehDb();
           if (!db) throw new Error('IndexedDB nicht erreichbar');
           const tx = db.transaction('saves', 'readwrite');
           tx.objectStore('saves').put(buf, 'POKEMON RED');
           tx.oncomplete = () => {
-            alert('⭐ Test-Spielstand für "Pokémon Rot" erfolgreich aktiviert!\n\nTrainer: ROT\nStarter: Glumanda\nStatus: 100% PKHeX-kompatibel (32.768 Bytes).\n\nDu kannst ihn jetzt mit "⬇️ .sav" herunterladen und in PKHeX öffnen oder im Spiel weiterspielen!');
+            alert('⭐ Starter-Spielstand für "Pokémon Rot" erfolgreich aktiviert!\n\nTrainer: ROT\nStarter: Glumanda\nGröße: 32.768 Bytes (SRAM)\n\nDu kannst ihn jetzt mit "⬇️ .sav" herunterladen oder direkt im Spiel weiterspielen!');
             playRetroBlip(880, 'square', 0.15);
             refreshSaveManagerList();
           };
